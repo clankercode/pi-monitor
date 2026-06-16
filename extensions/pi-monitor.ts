@@ -19,7 +19,7 @@ import {
 } from "../src/limits.ts";
 
 const MAX_CONTEXT_LINES = 200;
-const STATUSLINE_KEY = "pi-monitor";
+const STATUSLINE_KEY = "/m";
 
 /* ------------------------------------------------------------------ */
   /* ------------------------------------------------------------------ */
@@ -58,7 +58,7 @@ export default function (pi: ExtensionAPI) {
   function updateStatusline(): void {
     if (!setStatusRef) return;
     if (activeCount > 0) {
-      setStatusRef(STATUSLINE_KEY, `monitoring ${activeCount}`);
+      setStatusRef(STATUSLINE_KEY, `${activeCount}`);
     } else {
       setStatusRef(STATUSLINE_KEY, undefined);
     }
@@ -128,20 +128,13 @@ export default function (pi: ExtensionAPI) {
         debounceMs,
         onWindow: (window: MonitorWindow) => {
           const lines = window.events.map((e) => e.line).join("\n");
-          const fenced = formatDelivery(lines);
 
-          // Push to agent — hidden if busy, visible if idle
-          if (ctx.isIdle()) {
-            pi.sendMessage(
-              { customType: "pi-monitor", content: fenced.text, display: true },
-              { triggerTurn: true },
-            );
-          } else {
-            pi.sendMessage(
-              { customType: "pi-monitor", content: fenced.text, display: true },
-              { deliverAs: "nextTurn" },
-            );
-          }
+          // Send as a visible message to trigger agent reaction
+          pi.sendMessage({
+            customType: "pi-monitor",
+            content: `[monitor ${jobID}]\n${lines}`,
+            display: true,
+          });
         },
       });
 
@@ -328,7 +321,7 @@ export default function (pi: ExtensionAPI) {
       try {
         const result = await handleMonitor(ctx, command, regex, b, a, ds * 1000, label);
         return {
-          content: [{ type: "text", text: result }],
+          content: [{ type: "text", text: `${result}: \`${command}\` (regex: /${regexStr}/, ctx: ±${b}, debounce: ${ds}s)${label ? ` [${label}]` : ""}` }],
           details: { command, regex: regexStr, before: b, after: a, debounceSeconds: ds, label },
         };
       } catch (error) {
