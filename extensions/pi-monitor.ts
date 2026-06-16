@@ -330,6 +330,7 @@ export default function (pi: ExtensionAPI) {
       "Use for watching logs, build output, test runners, deploy status. " +
       "Stderr is not forwarded.",
     parameters: MonitorToolSchema,
+    renderShell: "self",
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const command = (params as MonitorToolParams).command;
       const regexStr = (params as MonitorToolParams).regex ?? ".*";
@@ -419,6 +420,7 @@ export default function (pi: ExtensionAPI) {
     label: "Stop Monitor",
     description: "Stop a running monitor by its ID.",
     parameters: MonitorStopSchema,
+    renderShell: "self",
     async execute(_toolCallId, params) {
       const { id } = params as { id: string };
       try {
