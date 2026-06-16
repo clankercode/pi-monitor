@@ -52,13 +52,21 @@ export default function (pi: ExtensionAPI) {
   let runner: ProcessRunner | null = null;
   let engines: Map<string, MonitorEngine> | null = null;
   let monitorCounter = 0;
-  let activeCount = 0;
+
+  interface MonitorInfo {
+    id: string;
+    command: string;
+    regex: string;
+    label?: string;
+    startedAt: number;
+  }
+  let activeMonitors = new Map<string, MonitorInfo>();
   let setStatusRef: ((key: string, text: string | undefined) => void) | null = null;
 
   function updateStatusline(): void {
     if (!setStatusRef) return;
-    if (activeCount > 0) {
-      setStatusRef(STATUSLINE_KEY, `${activeCount}`);
+    if (activeMonitors.size > 0) {
+      setStatusRef(STATUSLINE_KEY, `${activeMonitors.size}`);
     } else {
       setStatusRef(STATUSLINE_KEY, undefined);
     }
@@ -89,7 +97,7 @@ export default function (pi: ExtensionAPI) {
 
     engines = null;
     runner = null;
-    activeCount = 0;
+    activeMonitors.clear();
     if (setStatusRef) {
       setStatusRef(STATUSLINE_KEY, undefined);
       setStatusRef = null;
@@ -147,7 +155,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     enginesRef.set(jobID, engine);
-    activeCount++;
+    activeMonitors.set(jobID, { id: jobID, command, regex: regex.source, label, startedAt: Date.now() });
     updateStatusline();
 
     onOutput = (event: OutputEvent) => {
@@ -167,7 +175,7 @@ export default function (pi: ExtensionAPI) {
         engine.destroy();
         enginesRef.delete(jobID);
         runnerRef.dispose(jobID);
-        activeCount = Math.max(0, activeCount - 1);
+        activeMonitors.delete(jobID);
         updateStatusline();
       }
     })().catch(() => {});
@@ -190,7 +198,7 @@ export default function (pi: ExtensionAPI) {
 
     engine.destroy();
     enginesRef.delete(jobID);
-    activeCount = Math.max(0, activeCount - 1);
+    activeMonitors.delete(jobID);
     updateStatusline();
 
     try {
@@ -207,11 +215,19 @@ export default function (pi: ExtensionAPI) {
   /* ---------------------------------------------------------------- */
 
   function handleList(): string {
-    if (!engines || engines.size === 0) {
+    if (activeMonitors.size === 0) {
       return "no monitors running";
     }
-    const ids = [...engines.keys()];
-    return ids.map((id) => `- ${id}`).join("\n");
+    const now = Date.now();
+    return [...activeMonitors.values()].map((m) => {
+      const uptime = Math.floor((now - m.startedAt) / 1000);
+      const parts = [`- ${m.id}`];
+      parts.push(`\`${m.command}\``);
+      if (m.regex !== ".*") parts.push(`regex: /${m.regex}/`);
+      if (m.label) parts.push(`[${m.label}]`);
+      parts.push(`${uptime}s`);
+      return parts.join(" ");
+    }).join("\n");
   }
 
   /* ---------------------------------------------------------------- */
