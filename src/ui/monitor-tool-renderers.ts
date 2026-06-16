@@ -83,11 +83,11 @@ export function renderMonitorResult(
     container.addChild(new Text(theme.fg("muted", command), 0, 0));
 
     const meta: string[] = [];
-    if (regex !== ".*") meta.push(`/${regex}/`);
-    if (before !== 0 || after !== 0) {
+    if (regex !== undefined && regex !== ".*") meta.push(`/${regex}/`);
+    if (before !== undefined && after !== undefined && (before !== 0 || after !== 0)) {
       meta.push(`ctx: ±${before === after ? before : `${before}/${after}`}`);
     }
-    if (debounceSeconds !== 0) meta.push(`debounce: ${debounceSeconds}s`);
+    if (debounceSeconds !== undefined && debounceSeconds !== 0) meta.push(`debounce: ${debounceSeconds}s`);
     if (details.triggerTurn) meta.push("trigger");
 
     if (meta.length > 0) {

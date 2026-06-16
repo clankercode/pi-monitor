@@ -406,9 +406,9 @@ export default function (pi: ExtensionAPI) {
     },
     renderCall: (args, theme, context) =>
       renderMonitorCall(args as MonitorDetails, theme),
-    renderResult: (_result, options, theme, context) =>
+    renderResult: (result, options, theme, context) =>
       renderMonitorResult(
-        context.args as MonitorDetails,
+        (result.details as MonitorDetails) ?? (context.args as MonitorDetails),
         context.isError,
         options.isPartial,
         theme,
