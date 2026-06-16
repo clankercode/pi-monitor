@@ -28,7 +28,7 @@ const STATUSLINE_KEY = "/m";
 
   const MonitorToolSchema = Type.Object({
     command: Type.String({ description: "Shell command to run in the background" }),
-    regex: Type.String({ description: "Regex pattern to match against each stdout line" }),
+    regex: Type.Optional(Type.String({ description: "Regex pattern to match against each stdout line (default: match everything)" })),
     regexFlags: Type.Optional(Type.String({ description: "RegExp flags (default: '')" })),
     before: Type.Optional(Type.Number({ description: "Lines of context before match (default: 10)" })),
     after: Type.Optional(Type.Number({ description: "Lines of context after match (default: 10)" })),
@@ -273,8 +273,13 @@ export default function (pi: ExtensionAPI) {
       "Stderr is not forwarded.",
     parameters: MonitorToolSchema,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const { command, regex: regexStr, regexFlags, before, after, debounceSeconds, label } =
-        params as MonitorToolParams;
+      const command = (params as MonitorToolParams).command;
+      const regexStr = (params as MonitorToolParams).regex ?? ".*";
+      const regexFlags = (params as MonitorToolParams).regexFlags;
+      const before = (params as MonitorToolParams).before;
+      const after = (params as MonitorToolParams).after;
+      const debounceSeconds = (params as MonitorToolParams).debounceSeconds;
+      const label = (params as MonitorToolParams).label;
 
       // Validate regex
       if (regexStr.length > MAX_REGEX_PATTERN_LENGTH) {
@@ -314,9 +319,9 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      const b = clampInt(before ?? 10, 0, MAX_CONTEXT_LINES);
-      const a = clampInt(after ?? 10, 0, MAX_CONTEXT_LINES);
-      const ds = clampInt(debounceSeconds ?? 5, MIN_MONITOR_DEBOUNCE_S, MAX_MONITOR_DEBOUNCE_S);
+      const b = clampInt(before ?? 0, 0, MAX_CONTEXT_LINES);
+      const a = clampInt(after ?? 0, 0, MAX_CONTEXT_LINES);
+      const ds = clampInt(debounceSeconds ?? 0, MIN_MONITOR_DEBOUNCE_S, MAX_MONITOR_DEBOUNCE_S);
 
       try {
         const result = await handleMonitor(ctx, command, regex, b, a, ds * 1000, label);

@@ -19,7 +19,7 @@ export const MONITOR_PER_DELIVERY_CAP_EVENTS = 200;
 export const MAX_REGEX_PATTERN_LENGTH = 512;
 
 // Monitor debounce range (seconds)
-export const MIN_MONITOR_DEBOUNCE_S = 1;
+export const MIN_MONITOR_DEBOUNCE_S = 0;
 export const MAX_MONITOR_DEBOUNCE_S = 60;
 
 // Loop limits
