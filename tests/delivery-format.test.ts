@@ -4,6 +4,7 @@ import {
   formatCancel,
   formatDelivery,
   formatJobs,
+  formatMonitorXml,
   generateNonce,
   redactSecrets,
   sanitize,
@@ -200,5 +201,79 @@ describe('formatCancel', () => {
   it('includes directive', () => {
     const result = formatCancel('j', 'sched');
     assert.ok(result.text.includes('monitor triggered.'));
+  });
+});
+
+describe('formatMonitorXml', () => {
+  const baseInput = {
+    raw: 'matched line',
+    jobID: 'mon_1',
+    command: 'heartbeat 4.5m',
+    regex: '.*',
+    matchCount: 1,
+    lineCount: 1,
+    truncated: false,
+    at: Date.parse('2026-06-17T01:18:00Z'),
+  };
+
+  it('wraps content in a pi-monitor envelope', () => {
+    const xml = formatMonitorXml(baseInput);
+    assert.ok(xml.startsWith('<pi-monitor '));
+    assert.ok(xml.endsWith('</pi-monitor>'));
+    assert.ok(xml.includes('matched line'));
+  });
+
+  it('includes id, command, regex, match_count, line_count, truncated, at attributes', () => {
+    const xml = formatMonitorXml(baseInput);
+    assert.ok(xml.includes('id="mon_1"'));
+    assert.ok(xml.includes('command="heartbeat 4.5m"'));
+    assert.ok(xml.includes('regex=".*"'));
+    assert.ok(xml.includes('match_count="1"'));
+    assert.ok(xml.includes('line_count="1"'));
+    assert.ok(xml.includes('truncated="false"'));
+    assert.ok(xml.includes('at="2026-06-17T01:18:00Z"'));
+  });
+
+  it('includes label only when set', () => {
+    const without = formatMonitorXml(baseInput);
+    assert.ok(!without.includes('label='));
+    const withLabel = formatMonitorXml({ ...baseInput, label: 'heartbeat' });
+    assert.ok(withLabel.includes('label="heartbeat"'));
+  });
+
+  it('escapes special characters in attribute values', () => {
+    const xml = formatMonitorXml({
+      ...baseInput,
+      command: 'echo "hi" & <world>',
+      label: 'a"b',
+    });
+    assert.ok(xml.includes('&amp;'));
+    assert.ok(xml.includes('&lt;world&gt;'));
+    assert.ok(xml.includes('&quot;'));
+  });
+
+  it('escapes special characters in content text', () => {
+    const xml = formatMonitorXml({ ...baseInput, raw: '<danger> & "quoted"' });
+    assert.ok(xml.includes('&lt;danger&gt;'));
+    assert.ok(xml.includes('&amp;'));
+    // " in text content is NOT escaped (only < and & need to be).
+    assert.ok(xml.includes('"quoted"'));
+  });
+
+  it('redacts secrets in content', () => {
+    const xml = formatMonitorXml({ ...baseInput, raw: 'TOKEN=abc123' });
+    assert.ok(!xml.includes('abc123'));
+    assert.ok(xml.includes('****'));
+  });
+
+  it('strips ANSI escape sequences from content', () => {
+    const xml = formatMonitorXml({ ...baseInput, raw: '\x1b[31mERROR\x1b[0m connection refused' });
+    assert.ok(!xml.includes('\x1b['));
+    assert.ok(xml.includes('ERROR connection refused'));
+  });
+
+  it('formats the at timestamp as ISO 8601 UTC with second precision', () => {
+    const xml = formatMonitorXml({ ...baseInput, at: Date.parse('2024-04-21T12:00:00.123Z') });
+    assert.ok(xml.includes('at="2024-04-21T12:00:00Z"'));
   });
 });

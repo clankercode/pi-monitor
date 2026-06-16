@@ -8,6 +8,34 @@ const DEFAULT_MAX_PREVIEW = 200;
 // ----------------------------------------------------------------
 const DIRECTIVE = 'monitor triggered.';
 const NONCE_RE = /^[0-9a-f]{32}$/;
+const MONITOR_TAG = 'pi-monitor';
+
+// ----------------------------------------------------------------
+// XML escaping
+// ----------------------------------------------------------------
+
+/** Escape a string for use as an XML attribute value (single or double quoted). */
+function escapeXmlAttr(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;');
+}
+
+/** Escape a string for use as XML element text. */
+function escapeXmlText(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+}
+
+/** Format epoch ms as an ISO 8601 UTC string with second precision. */
+function formatIsoAt(epochMs: number): string {
+  return new Date(epochMs).toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
 
 // ----------------------------------------------------------------
 // Nonce generation
@@ -129,6 +157,58 @@ const DEFAULT_OPTIONS: FormatterOptions = {
 // ----------------------------------------------------------------
 // Public API
 // ----------------------------------------------------------------
+
+/**
+ * Format a monitor output window as an XML envelope.
+ *
+ * The envelope has the shape:
+ *
+ *   <pi-monitor id="mon_1" label="..." command="..." regex="..."
+ *                match_count="3" truncated="false" at="2026-06-17T01:18:00Z">
+ *   line 1
+ *   line 2
+ *   </pi-monitor>
+ *
+ * Attribute and text content is XML-escaped. The content is also passed
+ * through the same sanitize + redact pipeline as `formatDelivery`.
+ */
+export interface MonitorXmlInput {
+  /** Raw window text (multi-line, may contain ANSI / secrets). */
+  raw: string;
+  jobID: string;
+  label?: string;
+  command: string;
+  regex: string;
+  matchCount: number;
+  lineCount: number;
+  truncated: boolean;
+  /** Epoch ms — defaults to now. */
+  at?: number;
+}
+
+export function formatMonitorXml(input: MonitorXmlInput): string {
+  const at = input.at ?? Date.now();
+
+  // Sanitize + redact the inner content.
+  const inner = unwrapNonceFence(input.raw);
+  const sanitized = inner !== undefined ? sanitize(inner) : sanitize(input.raw);
+  const redacted = redactSecrets(sanitized);
+
+  const attrs: string[] = [
+    `id="${escapeXmlAttr(input.jobID)}"`,
+    `command="${escapeXmlAttr(input.command)}"`,
+    `regex="${escapeXmlAttr(input.regex)}"`,
+    `match_count="${input.matchCount}"`,
+    `line_count="${input.lineCount}"`,
+    `truncated="${input.truncated}"`,
+    `at="${formatIsoAt(at)}"`,
+  ];
+  if (input.label) {
+    attrs.push(`label="${escapeXmlAttr(input.label)}"`);
+  }
+
+  return `<${MONITOR_TAG} ${attrs.join(' ')}>\n${escapeXmlText(redacted)}\n</${MONITOR_TAG}>`;
+}
 
 /**
  * Format a delivery payload into structured text.

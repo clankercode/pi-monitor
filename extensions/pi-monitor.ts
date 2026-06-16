@@ -10,7 +10,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { ProcessRunner } from "../src/runner/process-runner.ts";
 import { MonitorEngine, type MonitorWindow } from "../src/runner/monitor-engine.ts";
 import { vetRegexPattern, close as closeRedos } from "../src/runner/redos.ts";
-import { formatDelivery } from "../src/delivery-format.ts";
+import { formatDelivery, formatMonitorXml } from "../src/delivery-format.ts";
 import type { OutputEvent } from "../src/types.ts";
 import {
   MIN_MONITOR_DEBOUNCE_S,
@@ -166,13 +166,25 @@ export default function (pi: ExtensionAPI) {
             lineCount: window.events.length,
             truncated: window.truncated,
           };
+          // Wrap the raw window text in an XML envelope so the LLM sees the
+          // metadata (id, label, command, regex, ...) alongside the content.
+          const xml = formatMonitorXml({
+            raw: lines,
+            jobID,
+            label,
+            command,
+            regex: regex.source,
+            matchCount: window.matchSeqs.length,
+            lineCount: window.events.length,
+            truncated: window.truncated,
+          });
           if (triggerTurn) {
             // When idle: use followUp so the renderer shows the compact view AND
             // triggerTurn wakes the LLM. When busy: steer interrupts after current tools.
             pi.sendMessage(
               {
                 customType: "pi-monitor",
-                content: lines,
+                content: xml,
                 display: true,
                 details,
               },
@@ -183,7 +195,7 @@ export default function (pi: ExtensionAPI) {
           } else {
             pi.sendMessage({
               customType: "pi-monitor",
-              content: lines,
+              content: xml,
               display: true,
               details,
             });
