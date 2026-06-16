@@ -325,8 +325,14 @@ export default function (pi: ExtensionAPI) {
 
       try {
         const result = await handleMonitor(ctx, command, regex, b, a, ds * 1000, label);
+        const parts: string[] = [];
+        if (regexStr !== ".*") parts.push(`regex: /${regexStr}/`);
+        if (b !== 0 || a !== 0) parts.push(`ctx: ±${b === a ? b : `${b}/${a}`}`);
+        if (ds !== 0) parts.push(`debounce: ${ds}s`);
+        if (label) parts.push(`[${label}]`);
+        const details = parts.length > 0 ? ` (${parts.join(", ")})` : "";
         return {
-          content: [{ type: "text", text: `${result}: \`${command}\` (regex: /${regexStr}/, ctx: ±${b}, debounce: ${ds}s)${label ? ` [${label}]` : ""}` }],
+          content: [{ type: "text", text: `${result}: \`${command}\`${details}` }],
           details: { command, regex: regexStr, before: b, after: a, debounceSeconds: ds, label },
         };
       } catch (error) {
