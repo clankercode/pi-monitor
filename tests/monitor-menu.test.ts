@@ -327,6 +327,45 @@ describe("monitor-menu", () => {
     assert.deepEqual(h.cancels(), ["mon_1"]);
   });
 
+  it("killing the only monitor auto-closes the menu (no stuck input box)", async () => {
+    const h = await makeReady([
+      { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
+    ]);
+    h.setSelectChoice("Yes");
+    await h.press("x");
+    // Flush for the close to complete and the custom() promise to resolve.
+    await h.flush();
+    await h.flush();
+    // After auto-close, the menu factory's done() should have been called.
+    // We can detect this by checking the harness's state: the captured
+    // component is still in scope, but the menu's custom() promise has
+    // resolved. The test here is indirect: cancelling the only monitor
+    // must not leave the list "0 running" still active.
+    assert.deepEqual(h.cancels(), ["mon_1"]);
+    // Subsequent input should be a no-op (the menu has closed).
+    await h.press("x");
+    await h.flush();
+    // No second cancel attempt.
+    assert.deepEqual(h.cancels(), ["mon_1"]);
+  });
+
+  it("killing one of multiple monitors does NOT auto-close", async () => {
+    const h = await makeReady([
+      { id: "mon_a", command: "echo a", regex: ".*", startedAt: 1 },
+      { id: "mon_b", command: "echo b", regex: ".*", startedAt: 2 },
+    ]);
+    h.setSelectChoice("Yes");
+    await h.press("x");
+    await h.flush();
+    assert.deepEqual(h.cancels(), ["mon_b"]);
+    // Menu should still be open: pressing x again should prompt (and we
+    // can verify the new monitor is the one being acted on).
+    h.setSelectChoice("Yes");
+    await h.press("x");
+    await h.flush();
+    assert.deepEqual(h.cancels(), ["mon_b", "mon_a"]);
+  });
+
   it("x with 'Don't Ask Again' kills and persists confirmStop=false", async () => {
     const h = await makeReady([
       { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },

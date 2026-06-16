@@ -190,16 +190,17 @@ export async function showMonitorMenu(opts: ShowMonitorMenuOptions): Promise<voi
     }
 
     const items = buildSelectItems(monitors, Date.now());
-    const list = new SelectList(items, Math.min(items.length, 8), themeFn());
+    let list = new SelectList(items, Math.min(items.length, 8), themeFn());
 
     // Internal mode state.
     let mode: "list" | "details" = "list";
 
-    function clampSelection(): void {
-      const selected = list.getSelectedItem();
-      if (selected && !monitors.some((m) => m.id === selected.value)) {
-        list.setSelectedIndex(0);
-      }
+    function rebuildList(): void {
+      // SelectList doesn't expose setItems, so on every refresh we
+      // construct a new instance. The new list starts at index 0, which
+      // is fine for a sorted-by-newest list.
+      const newItems = buildSelectItems(monitors, Date.now());
+      list = new SelectList(newItems, Math.min(newItems.length, 8), themeFn());
     }
 
     function refresh(): void {
@@ -208,7 +209,7 @@ export async function showMonitorMenu(opts: ShowMonitorMenuOptions): Promise<voi
       for (const m of monitors) {
         tails.set(m.id, opts.tail(m.id, "stdout"));
       }
-      clampSelection();
+      rebuildList();
     }
 
     function buildListMode(now: number): Container {
@@ -301,6 +302,17 @@ export async function showMonitorMenu(opts: ShowMonitorMenuOptions): Promise<voi
       container = buildContainer();
     }, REFRESH_MS);
 
+    // Close the menu cleanly: clear the refresh timer, release the
+    // custom() promise, and let the dispose callback do any extra work.
+    // After this runs the input box is fully restored to the user.
+    let closed = false;
+    function closeMenu(): void {
+      if (closed) return;
+      closed = true;
+      clearInterval(refreshTimer);
+      done(undefined);
+    }
+
     async function killSelected(): Promise<void> {
       const selected = list.getSelectedItem();
       if (!selected) return;
@@ -330,6 +342,15 @@ export async function showMonitorMenu(opts: ShowMonitorMenuOptions): Promise<voi
           opts.ctx.ui.notify(`failed to stop ${jobID}: ${reason}`, "error");
         }
         refresh();
+        // If the kill drained the monitor list, close the menu so the user
+        // gets back to the input box immediately. Leaving the menu open
+        // with a stale "0 running" state has caused input-box issues in
+        // the past (the custom() promise stays pending, the setInterval
+        // keeps ticking, the input doesn't accept Enter).
+        if (monitors.length === 0) {
+          closeMenu();
+          return;
+        }
         container = buildContainer();
       }
       // "No" or Esc (undefined) → do nothing.
@@ -339,19 +360,21 @@ export async function showMonitorMenu(opts: ShowMonitorMenuOptions): Promise<voi
       render: (w: number) => container.render(w),
       invalidate: () => container.invalidate(),
       handleInput: (data: string) => {
+        // Drop any input that arrives after the menu has closed — pi-tui
+        // may flush buffered keys during teardown, and we don't want them
+        // leaking to the input box.
+        if (closed) return;
         if (matchesKey(data, Key.escape)) {
           if (mode === "details") {
             mode = "list";
             container = buildContainer();
             return;
           }
-          clearInterval(refreshTimer);
-          done(undefined);
+          closeMenu();
           return;
         }
         if (matchesKey(data, "q") && mode === "list") {
-          clearInterval(refreshTimer);
-          done(undefined);
+          closeMenu();
           return;
         }
         if (matchesKey(data, "x")) {
@@ -373,6 +396,7 @@ export async function showMonitorMenu(opts: ShowMonitorMenuOptions): Promise<voi
       },
       dispose: () => {
         clearInterval(refreshTimer);
+        closed = true;
       },
     } as unknown as Component;
   });
