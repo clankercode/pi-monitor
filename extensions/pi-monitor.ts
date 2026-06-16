@@ -25,8 +25,13 @@ import {
   renderMonitorCall,
   renderMonitorResult,
   renderMonitorStopResult,
+  renderMonitorListCall,
+  renderMonitorListResult,
+  formatUptime,
   type MonitorDetails,
   type MonitorStopDetails,
+  type MonitorListDetails,
+  type ActiveMonitorInfo,
 } from "../src/ui/monitor-tool-renderers.ts";
 
 const MAX_CONTEXT_LINES = 200;
@@ -443,9 +448,36 @@ export default function (pi: ExtensionAPI) {
     label: "List Monitors",
     description: "List all running monitors.",
     parameters: MonitorListSchema,
+    renderShell: "self",
     async execute() {
-      const result = handleList();
-      return { content: [{ type: "text", text: result }], details: {} };
+      const now = Date.now();
+      const monitors: ActiveMonitorInfo[] = [...activeMonitors.values()].map((m) => ({
+        id: m.id,
+        command: m.command,
+        regex: m.regex,
+        label: m.label,
+        triggerTurn: m.triggerTurn,
+        uptimeSec: Math.floor((now - m.startedAt) / 1000),
+      }));
+      // Plain text fallback for the LLM to read in tool result content.
+      const text = monitors.length === 0
+        ? "no monitors running"
+        : monitors
+            .map((m) => {
+              const parts = [`- ${m.id}`, `\`${m.command}\``];
+              if (m.regex !== ".*") parts.push(`regex: /${m.regex}/`);
+              if (m.triggerTurn) parts.push("trigger");
+              if (m.label) parts.push(`[${m.label}]`);
+              parts.push(formatUptime(m.uptimeSec));
+              return parts.join(" ");
+            })
+            .join("\n");
+      return { content: [{ type: "text", text }], details: { monitors } };
+    },
+    renderCall: (_args, theme) => renderMonitorListCall(theme),
+    renderResult: (result, _options, theme, context) => {
+      const details = (result.details as MonitorListDetails) ?? { monitors: [] };
+      return renderMonitorListResult(details, context.isError, theme);
     },
   });
 }
@@ -459,14 +491,6 @@ function clampInt(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-function formatUptime(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  if (m < 60) return `${m}m ${s}s`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
-}
 
 interface ParsedMonitor {
   command: string;

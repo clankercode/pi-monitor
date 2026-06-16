@@ -28,6 +28,19 @@ export interface MonitorStopDetails {
   id: string;
 }
 
+export interface ActiveMonitorInfo {
+  id: string;
+  command: string;
+  regex: string;
+  label?: string;
+  triggerTurn?: boolean;
+  uptimeSec: number;
+}
+
+export interface MonitorListDetails {
+  monitors: ActiveMonitorInfo[];
+}
+
 // ── Monitor tool: call renderer ───────────────────────────────────────────────
 
 const INDENT_DIAMOND = " ";
@@ -125,4 +138,97 @@ export function renderMonitorStopResult(
     theme.fg("text", id);
 
   return new Text(line, 0, 0);
+}
+
+// ── MonitorList tool: call + result renderers ────────────────────────────────
+
+/**
+ * One-line preview shown while the MonitorList tool is executing.
+ *  ◈ monitor list
+ */
+export function renderMonitorListCall(theme: Theme): Component {
+  const line =
+    INDENT_DIAMOND +
+    theme.fg("accent", "◈ monitor") +
+    theme.fg("borderMuted", " · ") +
+    theme.fg("text", "list");
+  return new Text(line, 0, 0);
+}
+
+/**
+ * Result shown for the MonitorList tool.
+ *
+ *   ◈ monitor list (N running)
+ *      mon_1  `command`  meta...  uptime
+ *      mon_2  `command`
+ *      mon_3  `command`  /regex/  [label]  uptime
+ *
+ * Empty case:
+ *   ◈ monitor list
+ *      no monitors running
+ */
+export function renderMonitorListResult(
+  details: MonitorListDetails,
+  isError: boolean,
+  theme: Theme,
+): Component {
+  if (isError) {
+    return new Text(theme.fg("error", "MonitorList error"), 0, 0);
+  }
+
+  const monitors = details.monitors ?? [];
+  const container = new Container();
+
+  // Header: ◈ monitor list (N running) or ◈ monitor list when empty
+  const header = new Text(
+    INDENT_DIAMOND +
+      theme.fg("accent", "◈ monitor") +
+      theme.fg("borderMuted", " · ") +
+      theme.fg("text", "list") +
+      (monitors.length > 0
+        ? theme.fg("muted", ` (${monitors.length} running)`)
+        : ""),
+    0, 0,
+  );
+  container.addChild(header);
+
+  if (monitors.length === 0) {
+    container.addChild(new Text(
+      INDENT_CHILD + theme.fg("muted", "no monitors running"),
+      0, 0,
+    ));
+    return container;
+  }
+
+  // One line per monitor, indented 3 spaces
+  for (const m of monitors) {
+    const parts: string[] = [
+      theme.fg("text", m.id),
+      theme.fg("muted", ` \`${m.command}\``),
+    ];
+    if (m.regex !== undefined && m.regex !== ".*") {
+      parts.push(theme.fg("borderMuted", ` /${m.regex}/`));
+    }
+    if (m.triggerTurn) {
+      parts.push(theme.fg("borderMuted", " trigger"));
+    }
+    if (m.label) {
+      parts.push(theme.fg("borderMuted", ` [${m.label}]`));
+    }
+    parts.push(theme.fg("dim", ` ${formatUptime(m.uptimeSec)}`));
+
+    container.addChild(new Text(INDENT_CHILD + parts.join(""), 0, 0));
+  }
+
+  return container;
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+export function formatUptime(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return `${h}h ${m}m`;
 }
