@@ -49,9 +49,33 @@ Parameters:
 |---------|-------------|
 | `/monitor --regex <pattern> -- <cmd>` | Start a monitor |
 | `/monitor-stop <jobID>` | Stop a running monitor |
-| `/monitor-list` | List running monitors |
+| `/monitor-list` | Interactive menu: list monitors, view tail, stop |
 
 AI-callable tools: `Monitor`, `MonitorStop`, `MonitorList`.
+
+## `/monitor-list` menu
+
+Interactive TUI for inspecting and managing running monitors.
+
+- Lists all active monitors, **newest first**
+- Detail pane shows the **last 10 stdout lines** of the selected monitor (live refreshes every 1s)
+- **Up/Down**: navigate the list
+- **Enter / s**: stop the selected monitor (with confirm if `confirmStop` is true)
+- **x**: stop the selected monitor (skip confirm — kill semantics)
+- **Esc / q**: close the menu
+
+### Settings
+
+The menu reads one setting from `<cwd>/.pi/pi-monitor.json` (project) or `~/.pi/agent/pi-monitor.json` (global); project overrides global.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `confirmStop` | boolean | `true` | Whether Enter/s asks for confirmation before stopping |
+
+Example `<cwd>/.pi/pi-monitor.json`:
+```json
+{ "confirmStop": false }
+```
 
 ## Development
 

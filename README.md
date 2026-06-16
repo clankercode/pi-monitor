@@ -49,7 +49,7 @@ Parameters:
 |---------|-------------|
 | `/monitor --regex <pattern> -- <cmd>` | Start a monitor |
 | `/monitor-stop <jobID>` | Stop a running monitor |
-| `/monitor-list` | List running monitors |
+| `/monitor-list` | Interactive menu: list monitors, view tail, stop |
 
 AI-callable tools: `Monitor`, `MonitorStop`, `MonitorList`.
 

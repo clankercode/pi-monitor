@@ -33,6 +33,7 @@ import {
   type MonitorListDetails,
   type ActiveMonitorInfo,
 } from "../src/ui/monitor-tool-renderers.ts";
+import { getConfirmStop } from "../src/settings.ts";
 
 const MAX_CONTEXT_LINES = 200;
 const STATUSLINE_KEY = "/m";
@@ -322,9 +323,29 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("monitor-list", {
-    description: "List running monitors",
+    description: "Interactive menu: list running monitors, view tail, stop",
     handler: async (_args, ctx) => {
-      ctx.ui.notify(handleList());
+      if (activeMonitors.size === 0) {
+        ctx.ui.notify("no monitors running", "info");
+        return;
+      }
+      const { showMonitorMenu } = await import("../src/ui/monitor-menu.js");
+      await showMonitorMenu({
+        ctx: ctx as unknown as Parameters<typeof showMonitorMenu>[0]["ctx"],
+        getMonitors: () => [...activeMonitors.values()].map((m) => ({ ...m })),
+        tail: (jobID, stream) => {
+          const r = runner;
+          if (!r) return [];
+          try {
+            return r.tail(jobID, stream);
+          } catch {
+            // Engine may have been torn down between getMonitors and tail.
+            return [];
+          }
+        },
+        getConfirmStop: () => getConfirmStop(),
+        onCancel: (jobID) => handleCancel(jobID),
+      });
     },
   });
 
