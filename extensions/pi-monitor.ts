@@ -17,6 +17,10 @@ import {
   MAX_MONITOR_DEBOUNCE_S,
   MAX_REGEX_PATTERN_LENGTH,
 } from "../src/limits.ts";
+import {
+  registerCompactMonitorRenderer,
+  type PiMonitorMessageDetails,
+} from "../src/ui/compact-monitor-message.ts";
 
 const MAX_CONTEXT_LINES = 200;
 const STATUSLINE_KEY = "/m";
@@ -34,6 +38,7 @@ const STATUSLINE_KEY = "/m";
     after: Type.Optional(Type.Number({ description: "Lines of context after match (default: 10)" })),
     debounceSeconds: Type.Optional(Type.Number({ description: "Debounce window in seconds (1-60, default: 5)" })),
     label: Type.Optional(Type.String({ description: "Human-readable label for this monitor" })),
+    triggerTurn: Type.Optional(Type.Boolean({ description: "If true, deliver the monitor output as a user turn that triggers an LLM response (default: false)" })),
   });
 
   const MonitorStopSchema = Type.Object({
@@ -58,10 +63,13 @@ export default function (pi: ExtensionAPI) {
     command: string;
     regex: string;
     label?: string;
+    triggerTurn?: boolean;
     startedAt: number;
   }
   let activeMonitors = new Map<string, MonitorInfo>();
   let setStatusRef: ((key: string, text: string | undefined) => void) | null = null;
+
+  registerCompactMonitorRenderer(pi);
 
   function updateStatusline(): void {
     if (!setStatusRef) return;
@@ -116,6 +124,7 @@ export default function (pi: ExtensionAPI) {
     after: number,
     debounceMs: number,
     label?: string,
+    triggerTurn?: boolean,
   ): Promise<string> {
     const runnerRef = runner!;
     const enginesRef = engines!;
@@ -136,11 +145,37 @@ export default function (pi: ExtensionAPI) {
         debounceMs,
         onWindow: (window: MonitorWindow) => {
           const lines = window.events.map((e) => e.line).join("\n");
-          pi.sendMessage({
-            customType: "pi-monitor",
-            content: lines,
-            display: true,
-          });
+          const details: PiMonitorMessageDetails = {
+            jobID,
+            command,
+            regex: regex.source,
+            label,
+            matchCount: window.matchSeqs.length,
+            lineCount: window.events.length,
+            truncated: window.truncated,
+          };
+          if (triggerTurn) {
+            // When idle: use followUp so the renderer shows the compact view AND
+            // triggerTurn wakes the LLM. When busy: steer interrupts after current tools.
+            pi.sendMessage(
+              {
+                customType: "pi-monitor",
+                content: lines,
+                display: true,
+                details,
+              },
+              ctx.isIdle()
+                ? { triggerTurn: true, deliverAs: "followUp" }
+                : { deliverAs: "steer" },
+            );
+          } else {
+            pi.sendMessage({
+              customType: "pi-monitor",
+              content: lines,
+              display: true,
+              details,
+            });
+          }
         },
       });
 
@@ -153,7 +188,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     enginesRef.set(jobID, engine);
-    activeMonitors.set(jobID, { id: jobID, command, regex: regex.source, label, startedAt: Date.now() });
+    activeMonitors.set(jobID, { id: jobID, command, regex: regex.source, label, triggerTurn, startedAt: Date.now() });
     updateStatusline();
 
     onOutput = (event: OutputEvent) => {
@@ -222,6 +257,7 @@ export default function (pi: ExtensionAPI) {
       const parts = [`- ${m.id}`];
       parts.push(`\`${m.command}\``);
       if (m.regex !== ".*") parts.push(`regex: /${m.regex}/`);
+      if (m.triggerTurn) parts.push("trigger");
       if (m.label) parts.push(`[${m.label}]`);
       parts.push(formatUptime(elapsed));
       return parts.join(" ");
@@ -248,6 +284,7 @@ export default function (pi: ExtensionAPI) {
         parsed.after,
         parsed.debounceMs,
         parsed.label,
+        parsed.triggerTurn,
       );
       ctx.ui.notify(result);
     },
@@ -278,7 +315,7 @@ export default function (pi: ExtensionAPI) {
   /* ---------------------------------------------------------------- */
 
   pi.registerTool({
-    name: "monitor",
+    name: "Monitor",
     label: "Monitor",
     description:
       "Run a shell command in the background and watch stdout for regex matches. " +
@@ -294,6 +331,7 @@ export default function (pi: ExtensionAPI) {
       const after = (params as MonitorToolParams).after;
       const debounceSeconds = (params as MonitorToolParams).debounceSeconds;
       const label = (params as MonitorToolParams).label;
+      const triggerTurn = (params as MonitorToolParams).triggerTurn ?? false;
 
       // Validate regex
       if (regexStr.length > MAX_REGEX_PATTERN_LENGTH) {
@@ -338,16 +376,17 @@ export default function (pi: ExtensionAPI) {
       const ds = clampInt(debounceSeconds ?? 0, MIN_MONITOR_DEBOUNCE_S, MAX_MONITOR_DEBOUNCE_S);
 
       try {
-        const result = await handleMonitor(ctx, command, regex, b, a, ds * 1000, label);
+        const result = await handleMonitor(ctx, command, regex, b, a, ds * 1000, label, triggerTurn);
         const parts: string[] = [];
         if (regexStr !== ".*") parts.push(`regex: /${regexStr}/`);
         if (b !== 0 || a !== 0) parts.push(`ctx: ±${b === a ? b : `${b}/${a}`}`);
         if (ds !== 0) parts.push(`debounce: ${ds}s`);
+        if (triggerTurn) parts.push("trigger");
         if (label) parts.push(`[${label}]`);
         const details = parts.length > 0 ? ` (${parts.join(", ")})` : "";
         return {
           content: [{ type: "text", text: `${result}: \`${command}\`${details}` }],
-          details: { command, regex: regexStr, before: b, after: a, debounceSeconds: ds, label },
+          details: { command, regex: regexStr, before: b, after: a, debounceSeconds: ds, label, triggerTurn },
         };
       } catch (error) {
         return {
@@ -360,7 +399,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "monitor_stop",
+    name: "MonitorStop",
     label: "Stop Monitor",
     description: "Stop a running monitor by its ID.",
     parameters: MonitorStopSchema,
@@ -380,7 +419,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "monitor_list",
+    name: "MonitorList",
     label: "List Monitors",
     description: "List all running monitors.",
     parameters: MonitorListSchema,
@@ -416,6 +455,7 @@ interface ParsedMonitor {
   after: number;
   debounceMs: number;
   label?: string;
+  triggerTurn?: boolean;
 }
 
 function parseMonitorArgs(args: string): ParsedMonitor | string {
@@ -426,6 +466,7 @@ function parseMonitorArgs(args: string): ParsedMonitor | string {
   let after = 10;
   let debounceMs = 5000;
   let label: string | undefined;
+  let triggerTurn = false;
 
   let i = 0;
   while (i < parts.length) {
@@ -440,6 +481,8 @@ function parseMonitorArgs(args: string): ParsedMonitor | string {
       debounceMs = parseInt(parts[++i], 10) * 1000;
     } else if (arg === "--label" && i + 1 < parts.length) {
       label = parts[++i];
+    } else if (arg === "--trigger") {
+      triggerTurn = true;
     } else if (arg === "--") {
       command = parts.slice(i + 1).join(" ");
       break;
@@ -455,7 +498,7 @@ function parseMonitorArgs(args: string): ParsedMonitor | string {
 
   try {
     const regex = new RegExp(regexStr);
-    return { command, regex, before, after, debounceMs, label };
+    return { command, regex, before, after, debounceMs, label, triggerTurn };
   } catch {
     return `Invalid regex: ${regexStr}`;
   }

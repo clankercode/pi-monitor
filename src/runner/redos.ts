@@ -14,9 +14,17 @@ import {
 } from '../limits.ts';
 
 // ----------------------------------------------------------------
+// Fast-path safe patterns
+// ----------------------------------------------------------------
+/**
+ * Patterns that are trivially safe and should skip the worker-based ReDoS
+ * vetting entirely. This avoids worker-thread startup latency under load.
+ */
+const SAFE_PATTERN_RE = /^(?:\^?\.\*\$?|\^?\[\^\]?\*\$?|\^?\.\+\$?)$/;
+
+// ----------------------------------------------------------------
 // Errors
 // ----------------------------------------------------------------
-
 export class RedosTimeoutError extends Error {
   constructor(message?: string) {
     super(message ?? 'ReDoS regex check timed out');
@@ -27,7 +35,6 @@ export class RedosTimeoutError extends Error {
 // ----------------------------------------------------------------
 // Inline thread code (eval: true)
 // ----------------------------------------------------------------
-
 const THREAD_CODE = `
 import { isMainThread, parentPort, workerData } from 'worker_threads';
 
@@ -35,8 +42,8 @@ if (isMainThread === false) {
   const data = workerData;
   try {
     const re = new RegExp(data.pattern, data.flags ?? '');
-    const matched = re.test(data.text);
-    parentPort?.postMessage({ ok: true, matched });
+    const results = data.texts.map((text) => re.test(text));
+    parentPort?.postMessage({ ok: true, results });
   } catch (err) {
     parentPort?.postMessage({
       ok: false,
@@ -49,10 +56,9 @@ if (isMainThread === false) {
 // ----------------------------------------------------------------
 // Pool
 // ----------------------------------------------------------------
-
 interface WorkerResult {
   ok: true;
-  matched: boolean;
+  results: boolean[];
 }
 
 interface WorkerError {
@@ -72,18 +78,18 @@ class WorkerPool {
   #pending = 0;
   #closed = false;
 
-  post(pattern: string, flags: string, text: string, timeoutMs: number): Promise<WorkerResult> {
+  post(pattern: string, flags: string, texts: string[], timeoutMs: number): Promise<WorkerResult> {
     if (this.#closed) throw new RedosTimeoutError('pool closed');
     if (this.#pending >= REDOS_MAX_CONCURRENT) {
       throw new RedosTimeoutError('worker pool full');
     }
-    return this.#run(pattern, flags, text, timeoutMs);
+    return this.#run(pattern, flags, texts, timeoutMs);
   }
 
   #run(
     pattern: string,
     flags: string,
-    text: string,
+    texts: string[],
     timeoutMs: number,
   ): Promise<WorkerResult> {
     this.#pending += 1;
@@ -91,7 +97,7 @@ class WorkerPool {
     try {
       worker = new Worker(THREAD_CODE, {
         eval: true,
-        workerData: { pattern, flags, text },
+        workerData: { pattern, flags, texts },
       });
     } catch (err) {
       this.#freeSlot();
@@ -172,17 +178,16 @@ class WorkerPool {
 // ----------------------------------------------------------------
 // ReDoSWorker — user-facing class API
 // ----------------------------------------------------------------
-
 export class ReDoSWorker {
   #pool = new WorkerPool();
 
   test(
     pattern: string,
     flags: string,
-    text: string,
+    texts: string[],
     timeoutMs: number = REDOS_TIMEOUT_MS,
-  ): Promise<boolean> {
-    return this.#pool.post(pattern, flags, text, timeoutMs).then((r) => r.matched);
+  ): Promise<boolean[]> {
+    return this.#pool.post(pattern, flags, texts, timeoutMs).then((r) => r.results);
   }
 
   close(): Promise<void> {
@@ -193,12 +198,18 @@ export class ReDoSWorker {
 // ----------------------------------------------------------------
 // Shared pool singleton (used by vetRegexPattern)
 // ----------------------------------------------------------------
-
 let _sharedPool: WorkerPool | null = new WorkerPool();
 
 function getSharedPool(): WorkerPool {
   if (!_sharedPool) _sharedPool = new WorkerPool();
   return _sharedPool;
+}
+
+// Cache vet results per pattern+flags to avoid redundant worker runs.
+const _vetCache = new Map<string, boolean>();
+
+function cacheKey(pattern: string, flags: string): string {
+  return JSON.stringify({ pattern, flags });
 }
 
 /**
@@ -208,6 +219,8 @@ function getSharedPool(): WorkerPool {
  * both matching and non-matching inputs. The anchored form forces the engine
  * to match the full string, exposing exponential backtracking.
  *
+ * Results are cached per pattern+flags.
+ *
  * Returns `true` if the pattern is safe (no ReDoS detected).
  * Throws `RedosTimeoutError` if a pathological input times out.
  * Throws on invalid regex syntax.
@@ -216,17 +229,30 @@ export async function vetRegexPattern(
   pattern: string,
   flags?: string,
 ): Promise<boolean> {
+  const key = cacheKey(pattern, flags ?? '');
+  const cached = _vetCache.get(key);
+  if (cached !== undefined) return cached;
+
+  // Fast-path trivially safe patterns to avoid worker-thread startup latency.
+  if (SAFE_PATTERN_RE.test(pattern)) {
+    _vetCache.set(key, true);
+    return true;
+  }
+
   const pool = getSharedPool();
   // Anchor so the engine must match the entire string.
   const anchored = '^' + pattern + '$';
 
   // Increasing lengths of 'a's (matching) and 'a's + trailing '!' (non-matching).
   const lengths = [20, 32, 64, 128];
+  const texts: string[] = [];
   for (const n of lengths) {
-    await pool.post(anchored, flags ?? '', 'a'.repeat(n), REDOS_TIMEOUT_MS);
-    await pool.post(anchored, flags ?? '', 'a'.repeat(n) + '!', REDOS_TIMEOUT_MS);
+    texts.push('a'.repeat(n));
+    texts.push('a'.repeat(n) + '!');
   }
 
+  await pool.post(anchored, flags ?? '', texts, REDOS_TIMEOUT_MS);
+  _vetCache.set(key, true);
   return true;
 }
 
@@ -237,6 +263,7 @@ export async function vetRegexPattern(
 export function close(): Promise<void> {
   const pool = _sharedPool;
   _sharedPool = null;
+  _vetCache.clear();
   return pool ? pool.close() : Promise.resolve();
 }
 

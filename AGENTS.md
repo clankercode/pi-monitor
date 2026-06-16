@@ -26,12 +26,12 @@ pi install /path/to/pi-monitor
 
 ## Tools
 
-### `monitor`
+### `Monitor`
 
 Run a shell command in the background and watch stdout for regex matches.
 
 ```
-monitor command="tail -f /var/log/app.log" regex="error|warn" before=5 after=3
+Monitor command="tail -f /var/log/app.log" regex="error|warn" before=5 after=3
 ```
 
 Parameters:
@@ -50,6 +50,8 @@ Parameters:
 | `/monitor --regex <pattern> -- <cmd>` | Start a monitor |
 | `/monitor-stop <jobID>` | Stop a running monitor |
 | `/monitor-list` | List running monitors |
+
+AI-callable tools: `Monitor`, `MonitorStop`, `MonitorList`.
 
 ## Development
 
