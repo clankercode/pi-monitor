@@ -22,20 +22,27 @@ const MAX_CONTEXT_LINES = 200;
 const STATUSLINE_KEY = "pi-monitor";
 
 /* ------------------------------------------------------------------ */
-/* Tool schema                                                        */
-/* ------------------------------------------------------------------ */
+  /* ------------------------------------------------------------------ */
+  /* Tool schemas                                                       */
+  /* ------------------------------------------------------------------ */
 
-const MonitorToolSchema = Type.Object({
-  command: Type.String({ description: "Shell command to run in the background" }),
-  regex: Type.String({ description: "Regex pattern to match against each stdout line" }),
-  regexFlags: Type.Optional(Type.String({ description: "RegExp flags (default: '')" })),
-  before: Type.Optional(Type.Number({ description: "Lines of context before match (default: 10)" })),
-  after: Type.Optional(Type.Number({ description: "Lines of context after match (default: 10)" })),
-  debounceSeconds: Type.Optional(Type.Number({ description: "Debounce window in seconds (1-60, default: 5)" })),
-  label: Type.Optional(Type.String({ description: "Human-readable label for this monitor" })),
-});
+  const MonitorToolSchema = Type.Object({
+    command: Type.String({ description: "Shell command to run in the background" }),
+    regex: Type.String({ description: "Regex pattern to match against each stdout line" }),
+    regexFlags: Type.Optional(Type.String({ description: "RegExp flags (default: '')" })),
+    before: Type.Optional(Type.Number({ description: "Lines of context before match (default: 10)" })),
+    after: Type.Optional(Type.Number({ description: "Lines of context after match (default: 10)" })),
+    debounceSeconds: Type.Optional(Type.Number({ description: "Debounce window in seconds (1-60, default: 5)" })),
+    label: Type.Optional(Type.String({ description: "Human-readable label for this monitor" })),
+  });
 
-type MonitorToolParams = Static<typeof MonitorToolSchema>;
+  const MonitorStopSchema = Type.Object({
+    id: Type.String({ description: "Monitor ID to stop (e.g., mon_1)" }),
+  });
+
+  const MonitorListSchema = Type.Object({});
+
+  type MonitorToolParams = Static<typeof MonitorToolSchema>;
 
 /* ------------------------------------------------------------------ */
 /* Extension factory                                                  */
@@ -331,6 +338,37 @@ export default function (pi: ExtensionAPI) {
           isError: true,
         };
       }
+    },
+  });
+
+  pi.registerTool({
+    name: "monitor_stop",
+    label: "Stop Monitor",
+    description: "Stop a running monitor by its ID.",
+    parameters: MonitorStopSchema,
+    async execute(_toolCallId, params) {
+      const { id } = params as { id: string };
+      try {
+        const result = await handleCancel(id);
+        return { content: [{ type: "text", text: result }], details: { id } };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `Error: ${(error as Error).message}` }],
+          details: { id },
+          isError: true,
+        };
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "monitor_list",
+    label: "List Monitors",
+    description: "List all running monitors.",
+    parameters: MonitorListSchema,
+    async execute() {
+      const result = handleList();
+      return { content: [{ type: "text", text: result }], details: {} };
     },
   });
 }
