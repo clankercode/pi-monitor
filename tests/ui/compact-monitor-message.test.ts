@@ -4,6 +4,7 @@ import {
   buildCompactLine,
   buildExpandedComponent,
   CompactMonitorMessage,
+  stripMonitorEnvelope,
   type PiMonitorMessageDetails,
 } from '../../src/ui/compact-monitor-message.ts';
 import type { Theme } from '@earendil-works/pi-coding-agent';
@@ -144,5 +145,43 @@ describe('CompactMonitorMessage', () => {
     const second = component.render(40);
     assert.notStrictEqual(first, second);
     assert.deepStrictEqual(first, second);
+  });
+});
+
+describe('stripMonitorEnvelope', () => {
+  it('removes a wrapping <pi-monitor> envelope', () => {
+    const wrapped = '<pi-monitor id="mon_1" at="2026-06-17T01:18:00Z">\nhello world\n</pi-monitor>';
+    assert.strictEqual(stripMonitorEnvelope(wrapped), 'hello world');
+  });
+
+  it('returns content unchanged when no envelope is present', () => {
+    const raw = 'just a line';
+    assert.strictEqual(stripMonitorEnvelope(raw), raw);
+  });
+
+  it('preserves multi-line inner content', () => {
+    const wrapped = '<pi-monitor id="x" at="t">\nline one\nline two\nline three\n</pi-monitor>';
+    assert.strictEqual(stripMonitorEnvelope(wrapped), 'line one\nline two\nline three');
+  });
+});
+
+describe('buildCompactLine with envelope content', () => {
+  it('shows inner content, not the XML tag', () => {
+    const msg = {
+      content: '<pi-monitor id="mon_1" at="2026-06-17T01:18:00Z">\nactual matched line\n</pi-monitor>',
+      details: {
+        jobID: 'mon_1',
+        command: 'echo hi',
+        regex: '.*',
+        label: 'xml-test',
+        matchCount: 1,
+        lineCount: 1,
+        truncated: false,
+      },
+    };
+    const line = buildCompactLine(msg, plainTheme, 200);
+    assert.ok(line.includes('actual matched line'), 'should show inner content');
+    assert.ok(!line.includes('<pi-monitor'), 'should not show the XML tag');
+    assert.ok(!line.includes('at="'), 'should not show XML attributes');
   });
 });

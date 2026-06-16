@@ -23,6 +23,19 @@ const ICON = "◈";
 const KIND = "monitor";
 
 /**
+ * Strip a <pi-monitor ...>...</pi-monitor> envelope from a message content
+ * string. The envelope is added by the LLM-facing delivery (so the model sees
+ * the metadata) but the TUI renderer should display the bare content.
+ *
+ * Returns the inner text on success, or the original content if no envelope
+ * is present (so legacy / unwrapped messages still render).
+ */
+export function stripMonitorEnvelope(content: string): string {
+  const match = content.match(/^<pi-monitor\b[^>]*>\n([\s\S]*?)\n<\/pi-monitor>\s*$/);
+  return match ? match[1] : content;
+}
+
+/**
  * Build the compact single-line representation for a monitor window.
  *
  * The line is aggressively truncated so it never exceeds `width` display
@@ -39,7 +52,9 @@ export function buildCompactLine(
   width: number,
 ): string {
   const details = message.details;
-  const content = typeof message.content === "string" ? message.content : "";
+  const content = stripMonitorEnvelope(
+    typeof message.content === "string" ? message.content : "",
+  );
 
   const label = details?.label ?? details?.jobID ?? KIND;
   const matchCount = details?.matchCount ?? 1;
@@ -86,7 +101,9 @@ export function buildExpandedComponent(
   theme: Theme,
 ): Component {
   const details = message.details;
-  const content = typeof message.content === "string" ? message.content : "";
+  const content = stripMonitorEnvelope(
+    typeof message.content === "string" ? message.content : "",
+  );
 
   const label = details?.label ?? details?.jobID ?? KIND;
   const meta: string[] = [];
