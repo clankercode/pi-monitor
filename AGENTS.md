@@ -1,16 +1,18 @@
 # pi-monitor
 
-Pi extension that watches background processes and feeds their stdout lines
-as events to the agent session. Like Bash `run_in_background` but push-based:
-each stdout line arrives as a notification, no polling required.
+Pi extension that watches background processes and delivers regex-matching
+stdout windows (with before/after context) to the agent session.
 
 ## Features
 
-- **Push-based monitoring** — each stdout line is sent to the agent as it arrives
-- **Regex filtering** — only forward lines matching a pattern
-- **Auto-stop** — monitors that produce too many events are automatically stopped
-- **Session-scoped** — monitors stop when the session exits
-- **Multiple monitors** — run several monitors concurrently
+- **Regex matching** — only forward lines matching a pattern
+- **Before/after context** — deliver surrounding lines with each match
+- **Debouncing** — batch nearby matches into a single delivery
+- **ReDoS protection** — vet regex patterns before execution
+- **Nonce-fencing** — untrusted output is fenced with cryptographic nonces
+- **Secret redaction** — best-effort scrubbing of tokens, keys, passwords
+- **ANSI stripping** — remove terminal escape sequences from output
+- **Idle/busy routing** — deliver immediately if idle, queue if busy
 
 ## Installation
 
@@ -24,46 +26,28 @@ pi install /path/to/pi-monitor
 
 ### `monitor`
 
-Start a background monitor.
+Run a shell command in the background and watch stdout for regex matches.
 
 ```
-monitor command="tail -f /var/log/app.log" filter="error|warn" label="app-logs"
+monitor command="tail -f /var/log/app.log" regex="error|warn" before=5 after=3
 ```
 
 Parameters:
 - `command` (required) — shell command to run
-- `filter` (optional) — regex pattern, only matching lines are forwarded
-- `label` (optional) — human-readable label shown in notifications
-
-### `monitor_stop`
-
-Stop a running monitor by ID.
-
-```
-monitor_stop id="monitor-1"
-```
-
-### `monitor_list`
-
-List all running monitors.
-
-```
-monitor_list
-```
+- `regex` (required) — regex pattern to match against each stdout line
+- `regexFlags` (optional) — RegExp flags (default: '')
+- `before` (optional) — lines of context before match (0-200, default: 10)
+- `after` (optional) — lines of context after match (0-200, default: 10)
+- `debounceSeconds` (optional) — debounce window (1-60, default: 5)
+- `label` (optional) — human-readable label
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `/monitor` | Show running monitors |
-
-## Use Cases
-
-- **Deploy monitoring** — tail deploy logs, flag errors immediately
-- **CI status** — watch `gh run list` polling until a run finishes
-- **File watching** — watch a directory for changes
-- **Test streaming** — stream test runner output, surface failures as they occur
-- **Dev servers** — watch for errors in dev server output
+| `/monitor --regex <pattern> -- <cmd>` | Start a monitor |
+| `/monitor-stop <jobID>` | Stop a running monitor |
+| `/monitor-list` | List running monitors |
 
 ## Development
 
