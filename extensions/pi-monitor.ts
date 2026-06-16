@@ -21,6 +21,13 @@ import {
   registerCompactMonitorRenderer,
   type PiMonitorMessageDetails,
 } from "../src/ui/compact-monitor-message.ts";
+import {
+  renderMonitorCall,
+  renderMonitorResult,
+  renderMonitorStopResult,
+  type MonitorDetails,
+  type MonitorStopDetails,
+} from "../src/ui/monitor-tool-renderers.ts";
 
 const MAX_CONTEXT_LINES = 200;
 const STATUSLINE_KEY = "/m";
@@ -396,6 +403,15 @@ export default function (pi: ExtensionAPI) {
         };
       }
     },
+    renderCall: (args, theme, context) =>
+      renderMonitorCall(args as MonitorDetails, theme),
+    renderResult: (_result, options, theme, context) =>
+      renderMonitorResult(
+        context.args as MonitorDetails,
+        context.isError,
+        options.isPartial,
+        theme,
+      ),
   });
 
   pi.registerTool({
@@ -416,6 +432,8 @@ export default function (pi: ExtensionAPI) {
         };
       }
     },
+    renderResult: (_result, _options, theme, context) =>
+      renderMonitorStopResult(context.args as MonitorStopDetails, context.isError, theme),
   });
 
   pi.registerTool({
