@@ -144,15 +144,11 @@ export function renderMonitorStopResult(
 
 /**
  * One-line preview shown while the MonitorList tool is executing.
- *  ◈ monitor list
+ * Renders nothing — the result header already shows the same info, and
+ * showing both would duplicate the "list" label.
  */
-export function renderMonitorListCall(theme: Theme): Component {
-  const line =
-    INDENT_DIAMOND +
-    theme.fg("accent", "◈ monitor") +
-    theme.fg("borderMuted", " · ") +
-    theme.fg("text", "list");
-  return new Text(line, 0, 0);
+export function renderMonitorListCall(_theme: Theme): Component {
+  return new Text("", 0, 0);
 }
 
 /**

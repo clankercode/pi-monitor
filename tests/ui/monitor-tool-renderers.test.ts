@@ -160,10 +160,9 @@ describe("renderMonitorStopResult", () => {
 });
 
 describe("renderMonitorListCall", () => {
-  it("shows icon, kind, and list label", () => {
+  it("renders nothing (the result header already shows the list label)", () => {
     const text = collectLines(renderMonitorListCall(plainTheme));
-    assert.ok(text.includes("◈ monitor"));
-    assert.ok(text.includes("list"));
+    assert.strictEqual(text, "");
   });
 });
 
