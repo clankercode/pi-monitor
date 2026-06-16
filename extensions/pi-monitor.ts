@@ -218,12 +218,12 @@ export default function (pi: ExtensionAPI) {
     }
     const now = Date.now();
     return [...activeMonitors.values()].map((m) => {
-      const uptime = Math.floor((now - m.startedAt) / 1000);
+      const elapsed = Math.floor((now - m.startedAt) / 1000);
       const parts = [`- ${m.id}`];
       parts.push(`\`${m.command}\``);
       if (m.regex !== ".*") parts.push(`regex: /${m.regex}/`);
       if (m.label) parts.push(`[${m.label}]`);
-      parts.push(`${uptime}s`);
+      parts.push(formatUptime(elapsed));
       return parts.join(" ");
     }).join("\n");
   }
@@ -398,6 +398,15 @@ export default function (pi: ExtensionAPI) {
 function clampInt(value: number, min: number, max: number): number {
   if (!Number.isInteger(value)) return min;
   return Math.max(min, Math.min(max, value));
+}
+
+function formatUptime(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  if (m < 60) return `${m}m ${s}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
 }
 
 interface ParsedMonitor {
