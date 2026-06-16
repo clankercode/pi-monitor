@@ -30,13 +30,16 @@ export interface MonitorStopDetails {
 
 // ── Monitor tool: call renderer ───────────────────────────────────────────────
 
+const INDENT_DIAMOND = " ";
+const INDENT_CHILD = "   ";
+
 /**
  * One-line preview shown while the Monitor tool is executing.
- * ◈ monitor · label · command
+ *  ◈ monitor · label · command
  */
 export function renderMonitorCall(args: MonitorDetails, theme: Theme): Component {
   const { command, label } = args;
-  const parts: string[] = [theme.fg("accent", "◈ monitor")];
+  const parts: string[] = [INDENT_DIAMOND, theme.fg("accent", "◈ monitor")];
   if (label) parts.push(theme.fg("text", ` · ${label}`));
   parts.push(theme.fg("borderMuted", " · "));
   parts.push(theme.fg("muted", command));
@@ -49,10 +52,11 @@ export function renderMonitorCall(args: MonitorDetails, theme: Theme): Component
 /**
  * Result shown when a monitor starts successfully.
  *
- * Collapsed:  ◈ monitor started · label
- * Expanded:   ◈ monitor started · label
- *             command
- *             /regex/ · ctx: ±N · debounce: Ns · trigger
+ *   ◈ monitor started · label
+ *      /regex/
+ *      ctx: ±N
+ *      debounce: Ns
+ *      trigger
  */
 export function renderMonitorResult(
   details: MonitorDetails,
@@ -64,34 +68,32 @@ export function renderMonitorResult(
     return new Text(theme.fg("error", "Monitor error"), 0, 0);
   }
 
-  const { command, regex, before, after, debounceSeconds, label } = details;
+  const { regex, before, after, debounceSeconds, label } = details;
 
   const container = new Container();
 
-  // Header: ◈ monitor started · label
+  // Header: ◈ monitor started · label (indented 1 space)
   const header = new Text(
-    (label
-      ? theme.fg("accent", "◈ monitor") + theme.fg("success", " started") + theme.fg("borderMuted", " · ") + theme.fg("text", label)
-      : theme.fg("accent", "◈ monitor") + theme.fg("success", " started")),
+    INDENT_DIAMOND +
+      (label
+        ? theme.fg("accent", "◈ monitor") + theme.fg("success", " started") + theme.fg("borderMuted", " · ") + theme.fg("text", label)
+        : theme.fg("accent", "◈ monitor") + theme.fg("success", " started")),
     0, 0,
   );
   container.addChild(header);
 
-  // Expanded: show command + metadata
+  // Metadata: each on its own line, indented 3 spaces, directly under the parent
   if (!isPartial) {
-    container.addChild(new Spacer(1));
-    container.addChild(new Text(theme.fg("muted", command), 0, 0));
-
-    const meta: string[] = [];
-    if (regex !== undefined && regex !== ".*") meta.push(`/${regex}/`);
+    const metaItems: string[] = [];
+    if (regex !== undefined && regex !== ".*") metaItems.push(`/${regex}/`);
     if (before !== undefined && after !== undefined && (before !== 0 || after !== 0)) {
-      meta.push(`ctx: ±${before === after ? before : `${before}/${after}`}`);
+      metaItems.push(`ctx: ±${before === after ? before : `${before}/${after}`}`);
     }
-    if (debounceSeconds !== undefined && debounceSeconds !== 0) meta.push(`debounce: ${debounceSeconds}s`);
-    if (details.triggerTurn) meta.push("trigger");
+    if (debounceSeconds !== undefined && debounceSeconds !== 0) metaItems.push(`debounce: ${debounceSeconds}s`);
+    if (details.triggerTurn) metaItems.push("trigger");
 
-    if (meta.length > 0) {
-      container.addChild(new Text(theme.fg("borderMuted", meta.join(" · ")), 0, 0));
+    for (const item of metaItems) {
+      container.addChild(new Text(INDENT_CHILD + theme.fg("borderMuted", item), 0, 0));
     }
   }
 
@@ -116,6 +118,7 @@ export function renderMonitorStopResult(
 
   const { id } = details;
   const line =
+    INDENT_DIAMOND +
     theme.fg("accent", "◈ monitor") +
     theme.fg("warning", " stopped") +
     theme.fg("borderMuted", " · ") +

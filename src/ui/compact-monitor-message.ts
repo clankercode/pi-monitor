@@ -56,8 +56,8 @@ export function buildCompactLine(
 
   const parts: string[] = [];
 
-  // Prefix: icon + kind + label
-  parts.push(theme.fg("accent", `${ICON} ${KIND}`) + theme.fg("text", ` · ${label}`));
+  // Prefix: 1-space indent + icon + kind + label
+  parts.push(" " + theme.fg("accent", `${ICON} ${KIND}`) + theme.fg("text", ` · ${label}`));
 
   // Match count when there are multiple matches.
   if (matchCount > 1) {
