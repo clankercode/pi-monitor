@@ -136,11 +136,9 @@ export default function (pi: ExtensionAPI) {
         debounceMs,
         onWindow: (window: MonitorWindow) => {
           const lines = window.events.map((e) => e.line).join("\n");
-
-          // Send as a visible message to trigger agent reaction
           pi.sendMessage({
             customType: "pi-monitor",
-            content: `[monitor ${jobID}]\n${lines}`,
+            content: lines,
             display: true,
           });
         },
