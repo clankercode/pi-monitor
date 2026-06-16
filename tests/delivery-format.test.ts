@@ -208,11 +208,6 @@ describe('formatMonitorXml', () => {
   const baseInput = {
     raw: 'matched line',
     jobID: 'mon_1',
-    command: 'heartbeat 4.5m',
-    regex: '.*',
-    matchCount: 1,
-    lineCount: 1,
-    truncated: false,
     at: Date.parse('2026-06-17T01:18:00Z'),
   };
 
@@ -223,33 +218,22 @@ describe('formatMonitorXml', () => {
     assert.ok(xml.includes('matched line'));
   });
 
-  it('includes id, command, regex, match_count, line_count, truncated, at attributes', () => {
+  it('includes only id and at attributes', () => {
     const xml = formatMonitorXml(baseInput);
     assert.ok(xml.includes('id="mon_1"'));
-    assert.ok(xml.includes('command="heartbeat 4.5m"'));
-    assert.ok(xml.includes('regex=".*"'));
-    assert.ok(xml.includes('match_count="1"'));
-    assert.ok(xml.includes('line_count="1"'));
-    assert.ok(xml.includes('truncated="false"'));
     assert.ok(xml.includes('at="2026-06-17T01:18:00Z"'));
-  });
-
-  it('includes label only when set', () => {
-    const without = formatMonitorXml(baseInput);
-    assert.ok(!without.includes('label='));
-    const withLabel = formatMonitorXml({ ...baseInput, label: 'heartbeat' });
-    assert.ok(withLabel.includes('label="heartbeat"'));
+    // Sanity: no other metadata leaks into the envelope.
+    assert.ok(!xml.includes('command='));
+    assert.ok(!xml.includes('regex='));
+    assert.ok(!xml.includes('match_count='));
+    assert.ok(!xml.includes('line_count='));
+    assert.ok(!xml.includes('truncated='));
+    assert.ok(!xml.includes('label='));
   });
 
   it('escapes special characters in attribute values', () => {
-    const xml = formatMonitorXml({
-      ...baseInput,
-      command: 'echo "hi" & <world>',
-      label: 'a"b',
-    });
-    assert.ok(xml.includes('&amp;'));
-    assert.ok(xml.includes('&lt;world&gt;'));
-    assert.ok(xml.includes('&quot;'));
+    const xml = formatMonitorXml({ ...baseInput, jobID: 'a&b<c>"' });
+    assert.ok(xml.includes('a&amp;b&lt;c&gt;&quot;'));
   });
 
   it('escapes special characters in content text', () => {

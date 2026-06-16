@@ -159,15 +159,18 @@ const DEFAULT_OPTIONS: FormatterOptions = {
 // ----------------------------------------------------------------
 
 /**
- * Format a monitor output window as an XML envelope.
+ * Format a monitor output window as a minimal XML envelope.
  *
  * The envelope has the shape:
  *
- *   <pi-monitor id="mon_1" label="..." command="..." regex="..."
- *                match_count="3" truncated="false" at="2026-06-17T01:18:00Z">
+ *   <pi-monitor id="mon_1" at="2026-06-17T01:18:00Z">
  *   line 1
  *   line 2
  *   </pi-monitor>
+ *
+ * Only `id` and `at` are included. The agent can call MonitorList for
+ * command, regex, label, match counts, etc. — we don't repeat them
+ * on every tick.
  *
  * Attribute and text content is XML-escaped. The content is also passed
  * through the same sanitize + redact pipeline as `formatDelivery`.
@@ -176,12 +179,6 @@ export interface MonitorXmlInput {
   /** Raw window text (multi-line, may contain ANSI / secrets). */
   raw: string;
   jobID: string;
-  label?: string;
-  command: string;
-  regex: string;
-  matchCount: number;
-  lineCount: number;
-  truncated: boolean;
   /** Epoch ms — defaults to now. */
   at?: number;
 }
@@ -196,16 +193,8 @@ export function formatMonitorXml(input: MonitorXmlInput): string {
 
   const attrs: string[] = [
     `id="${escapeXmlAttr(input.jobID)}"`,
-    `command="${escapeXmlAttr(input.command)}"`,
-    `regex="${escapeXmlAttr(input.regex)}"`,
-    `match_count="${input.matchCount}"`,
-    `line_count="${input.lineCount}"`,
-    `truncated="${input.truncated}"`,
     `at="${formatIsoAt(at)}"`,
   ];
-  if (input.label) {
-    attrs.push(`label="${escapeXmlAttr(input.label)}"`);
-  }
 
   return `<${MONITOR_TAG} ${attrs.join(' ')}>\n${escapeXmlText(redacted)}\n</${MONITOR_TAG}>`;
 }

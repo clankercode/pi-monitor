@@ -166,17 +166,11 @@ export default function (pi: ExtensionAPI) {
             lineCount: window.events.length,
             truncated: window.truncated,
           };
-          // Wrap the raw window text in an XML envelope so the LLM sees the
-          // metadata (id, label, command, regex, ...) alongside the content.
+          // Wrap the raw window text in a minimal XML envelope (id + at only).
+          // The LLM can call MonitorList for command/regex/label/match counts.
           const xml = formatMonitorXml({
             raw: lines,
             jobID,
-            label,
-            command,
-            regex: regex.source,
-            matchCount: window.matchSeqs.length,
-            lineCount: window.events.length,
-            truncated: window.truncated,
           });
           if (triggerTurn) {
             // When idle: use followUp so the renderer shows the compact view AND
