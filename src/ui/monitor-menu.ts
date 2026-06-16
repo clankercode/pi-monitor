@@ -5,9 +5,15 @@
  * on top, a detail pane (last few log lines) below, and footer keybinding hints.
  * Live-refreshes the tail snapshot every second so a long-running build/test
  * monitor shows fresh output without the user having to close and reopen.
+ *
+ * Visual design: the entire menu is wrapped in a `Box` with padding and a
+ * horizontal-rule frame, so it reads as a separate "panel" floating over the
+ * underlying TUI. A live-updating elapsed-time counter and wall-clock make the
+ * 1s refresh rate obvious to the user.
  */
 import { getSelectListTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import {
+  Box,
   type Component,
   Container,
   Key,
@@ -20,6 +26,8 @@ import {
 
 const TAIL_LINES = 10;
 const REFRESH_MS = 1000;
+const PAD_X = 2;
+const PAD_Y = 1;
 
 export interface MonitorMenuMonitor {
   id: string;
@@ -40,6 +48,8 @@ export interface ShowMonitorMenuOptions {
   };
   /** Optional theme override. Defaults to the global theme's SelectList theme. */
   getSelectListTheme?: () => ReturnType<typeof getSelectListTheme>;
+  /** Optional Theme for the panel frame. Falls back to passing through plain text. */
+  getTheme?: () => Theme;
   /** Live source for the current monitor set — re-queried on every refresh. */
   getMonitors: () => MonitorMenuMonitor[];
   /** Tail snapshot provider — called per monitor per refresh. */
@@ -59,6 +69,21 @@ function formatUptime(startedAt: number, now: number): string {
   if (elapsed < 60) return `${elapsed}s`;
   if (elapsed < 3600) return `${Math.floor(elapsed / 60)}m${(elapsed % 60).toString().padStart(2, "0")}s`;
   return `${Math.floor(elapsed / 3600)}h${Math.floor((elapsed % 3600) / 60).toString().padStart(2, "0")}m`;
+}
+
+function formatClock(ts: number): string {
+  const d = new Date(ts);
+  const hh = d.getHours().toString().padStart(2, "0");
+  const mm = d.getMinutes().toString().padStart(2, "0");
+  const ss = d.getSeconds().toString().padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+
+function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  if (total < 60) return `${total}s`;
+  if (total < 3600) return `${Math.floor(total / 60)}m${(total % 60).toString().padStart(2, "0")}s`;
+  return `${Math.floor(total / 3600)}h${Math.floor((total % 3600) / 60).toString().padStart(2, "0")}m`;
 }
 
 function buildSelectItems(monitors: MonitorMenuMonitor[], now: number): SelectItem[] {
@@ -89,22 +114,22 @@ export async function showMonitorMenu(opts: ShowMonitorMenuOptions): Promise<voi
   // view — would need ProcessRunner to track per-line timestamps, or to
   // expose a `getMergedTail(jobID)` method. Defer to v2.
 
-  await opts.ctx.ui.custom<void>((_tui, _theme, _keybindings, done) => {
+  await opts.ctx.ui.custom<void>((_tui, theme, _keybindings, done) => {
     const initialMonitors = opts.getMonitors();
+    const menuOpenedAt = Date.now();
+    const themeFn = opts.getSelectListTheme ?? getSelectListTheme;
+    const panelTheme = opts.getTheme;
+
     if (initialMonitors.length === 0) {
-      // Defensive: the command handler should already have notify'd and returned
-      // when the list is empty, but render an empty state in case a caller
-      // forgets that check.
+      // Defensive empty state.
       const container = new Container();
       container.addChild(new Text("Monitor List (0 running)", 0, 0));
       container.addChild(new Spacer(1));
       container.addChild(new Text("No monitors running.", 0, 0));
-      // Defer close so the overlay has a chance to mount.
       queueMicrotask(() => done(undefined));
-      return container as unknown as Component;
+      return wrapInPanel(container, theme, panelTheme) as unknown as Component;
     }
 
-    // Build initial state.
     let monitors: MonitorMenuMonitor[] = initialMonitors;
     let tails = new Map<string, string[]>();
     for (const m of initialMonitors) {
@@ -112,11 +137,9 @@ export async function showMonitorMenu(opts: ShowMonitorMenuOptions): Promise<voi
     }
 
     const items = buildSelectItems(monitors, Date.now());
-    const themeFn = opts.getSelectListTheme ?? getSelectListTheme;
     const list = new SelectList(items, Math.min(items.length, 8), themeFn());
 
-    function rebuild(): void {
-      // If the previously selected monitor was removed, clamp to index 0.
+    function clampSelection(): void {
       const selected = list.getSelectedItem();
       if (selected && !monitors.some((m) => m.id === selected.value)) {
         list.setSelectedIndex(0);
@@ -129,65 +152,64 @@ export async function showMonitorMenu(opts: ShowMonitorMenuOptions): Promise<voi
       for (const m of monitors) {
         tails.set(m.id, opts.tail(m.id, "stdout"));
       }
-      rebuild();
+      clampSelection();
     }
 
-    function buildContainer(currentContainer: Container): void {
-      // The SelectList component handles its own selection/render — we just
-      // surround it with title, detail, and footer text. The detail is read
-      // from the SelectList's current selection.
+    function buildContainer(): Container {
+      const now = Date.now();
+      const elapsed = now - menuOpenedAt;
       const selected = list.getSelectedItem();
       const selectedMonitor = selected
         ? monitors.find((m) => m.id === selected.value)
         : undefined;
-      const detailHeader = selectedMonitor
-        ? `── ${selectedMonitor.id} last ${TAIL_LINES} lines ──`
-        : "── select a monitor ──";
       const lines = selectedMonitor ? (tails.get(selectedMonitor.id) ?? []) : [];
       const last = lines.slice(-TAIL_LINES);
 
-      // Build a fresh container each refresh so list+detail stay in sync.
-      // pi-tui's Container doesn't expose a swap-children API, so we
-      // rebuild the whole tree on each tick. This is cheap (8 monitors,
-      // 10 tail lines) but could be optimized if needed.
-      // To avoid leaking children, we don't mutate `currentContainer` —
-      // we re-render from scratch via the outer `container` reference
-      // (set after first build).
-      const fresh = new Container();
-      fresh.addChild(new Text(`Monitor List (${monitors.length} running)`, 0, 0));
-      fresh.addChild(new Spacer(1));
-      fresh.addChild(list);
-      fresh.addChild(new Spacer(1));
-      fresh.addChild(new Text(detailHeader, 0, 0));
+      const c = new Container();
+
+      // Header bar: title left, live elapsed + clock right
+      const title = `Monitor List · ${monitors.length} running`;
+      const right = `${formatElapsed(elapsed)} · ${formatClock(now)}`;
+      c.addChild(new Text(`${title}                                          ${right}`.trimEnd(), 0, 0));
+      c.addChild(new Text("─".repeat(80), 0, 0));
+      c.addChild(new Spacer(1));
+
+      // Monitor list
+      c.addChild(list);
+
+      c.addChild(new Spacer(1));
+      c.addChild(new Text("─".repeat(80), 0, 0));
+
+      // Detail pane: selected monitor's last 10 lines
+      const detailHeader = selectedMonitor
+        ? `── ${selectedMonitor.id} · last ${TAIL_LINES} lines · ${formatUptime(selectedMonitor.startedAt, now)} ──`
+        : "── select a monitor ──";
+      c.addChild(new Text(detailHeader, 0, 0));
       if (last.length === 0) {
-        fresh.addChild(new Text("  (no output yet)", 0, 0));
+        c.addChild(new Text("  (no output yet)", 0, 0));
       } else {
         for (const line of last) {
-          fresh.addChild(new Text(`  ${line}`, 0, 0));
+          c.addChild(new Text(`  ${line}`, 0, 0));
         }
       }
-      fresh.addChild(new Spacer(1));
+
+      c.addChild(new Spacer(1));
+      c.addChild(new Text("─".repeat(80), 0, 0));
+
+      // Footer bar: keyboard hints
       const hint = opts.getConfirmStop()
         ? "Enter/s: stop (confirm)  ·  x: kill  ·  Esc/q: close  ·  (newest first)"
         : "Enter/s: stop  ·  x: kill  ·  Esc/q: close  ·  (newest first)";
-      fresh.addChild(new Text(hint, 0, 0));
+      c.addChild(new Text(hint, 0, 0));
 
-      // Mutate the original container's children via the public API.
-      // Container in pi-tui has no removeChild, so we just hand `fresh`
-      // back to the closure-scope `container` variable that `render()` reads.
-      // TypeScript-wise we keep `currentContainer` as a placeholder so the
-      // function signature matches.
-      void currentContainer;
-      container = fresh;
+      return c;
     }
 
-    // Closure-scope reference that render() reads; replaced on each rebuild.
-    let container: Container = new Container();
-    buildContainer(container);
+    let container: Component = wrapInPanel(buildContainer(), theme, panelTheme);
 
     const refreshTimer = setInterval(() => {
       refresh();
-      buildContainer(container);
+      container = wrapInPanel(buildContainer(), theme, panelTheme);
     }, REFRESH_MS);
 
     async function stopSelected(skipConfirm: boolean): Promise<void> {
@@ -208,9 +230,8 @@ export async function showMonitorMenu(opts: ShowMonitorMenuOptions): Promise<voi
         const reason = err instanceof Error ? err.message : String(err);
         opts.ctx.ui.notify(`failed to stop ${jobID}: ${reason}`, "error");
       }
-      // Refresh immediately so the just-stopped monitor disappears from the list.
       refresh();
-      buildContainer(container);
+      container = wrapInPanel(buildContainer(), theme, panelTheme);
     }
 
     return {
@@ -230,7 +251,6 @@ export async function showMonitorMenu(opts: ShowMonitorMenuOptions): Promise<voi
           void stopSelected(false);
           return;
         }
-        // Everything else: forward to the SelectList (arrow keys, page up/down, etc.)
         list.handleInput(data);
       },
       dispose: () => {
@@ -238,4 +258,21 @@ export async function showMonitorMenu(opts: ShowMonitorMenuOptions): Promise<voi
       },
     } as unknown as Component;
   });
+}
+
+/**
+ * Wrap an inner Container in a Box that gives the menu a clear visual
+ * boundary against the surrounding TUI. The Box applies horizontal padding
+ * so the panel content is inset from the panel border, and an optional
+ * background function tints the panel area.
+ *
+ * If a panelTheme is provided, we use `theme.bg("customMessageBg", text)` to
+ * give the panel a subtle background. Otherwise we fall back to passing text
+ * through unchanged so the menu still works in print/RPC modes.
+ */
+function wrapInPanel(inner: Container, _theme: Theme, panelTheme?: () => Theme): Component {
+  const bgFn = panelTheme ? (t: string) => panelTheme().bg("customMessageBg", t) : undefined;
+  const box = new Box(PAD_X, PAD_Y, bgFn);
+  box.addChild(inner);
+  return box;
 }

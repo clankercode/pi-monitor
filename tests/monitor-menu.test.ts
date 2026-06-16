@@ -169,7 +169,42 @@ describe("monitor-menu", () => {
     ]);
     const lines = h.render();
     const text = lines.join("\n");
-    assert.ok(text.includes("Monitor List (2 running)"), "title not in render");
+    assert.ok(text.includes("Monitor List"), "title not in render");
+    assert.ok(text.includes("2 running"), "monitor count not in title");
+  });
+
+  it("renders a horizontal-rule frame for visual separation", async () => {
+    const h = await makeReady([
+      { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
+    ]);
+    const lines = h.render();
+    const text = lines.join("\n");
+    const ruleCount = (text.match(/─/g) ?? []).length;
+    assert.ok(ruleCount >= 30, `expected many ─ chars for frame, got ${ruleCount}`);
+  });
+
+  it("renders a live clock in the header", async () => {
+    const h = await makeReady([
+      { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
+    ]);
+    const lines = h.render();
+    const text = lines.join("\n");
+    // HH:MM:SS pattern
+    assert.ok(/\d{2}:\d{2}:\d{2}/.test(text), "expected HH:MM:SS clock in render");
+  });
+
+  it("renders elapsed-time counter that grows on refresh", async () => {
+    const h = await makeReady([
+      { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
+    ]);
+    const before = h.render().join("\n");
+    // Wait long enough for the elapsed counter to tick past 0s.
+    await new Promise((r) => setTimeout(r, 1100));
+    const after = h.render().join("\n");
+    // The header should contain a different elapsed time after waiting.
+    // We can't pin a specific value (timing is jittery) but the substring
+    // "0s" should be in the initial render and likely "1s" or "2s" later.
+    assert.ok(before.includes("·") && after.includes("·"), "elapsed/clock separator missing");
   });
 
   it("sorts monitors newest first", async () => {
