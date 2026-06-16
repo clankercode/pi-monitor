@@ -33,7 +33,7 @@ import {
   type MonitorListDetails,
   type ActiveMonitorInfo,
 } from "../src/ui/monitor-tool-renderers.ts";
-import { getConfirmStop } from "../src/settings.ts";
+import { getConfirmStop, setConfirmStop } from "../src/settings.ts";
 
 const MAX_CONTEXT_LINES = 200;
 const STATUSLINE_KEY = "/m";
@@ -344,6 +344,7 @@ export default function (pi: ExtensionAPI) {
           }
         },
         getConfirmStop: () => getConfirmStop(),
+        setConfirmStop: (value) => setConfirmStop(value),
         onCancel: (jobID) => handleCancel(jobID),
       });
     },

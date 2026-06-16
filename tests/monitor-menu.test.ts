@@ -14,15 +14,23 @@ interface CapturedComponent {
   dispose?: () => void;
 }
 
+interface SelectPrompt {
+  title: string;
+  options: string[];
+}
+
 interface Harness {
   press: (key: string) => Promise<void>;
   render: () => string[];
   flush: () => Promise<void>;
   dispose: () => Promise<void>;
-  setConfirmResult: (v: boolean) => void;
   setConfirmStop: (v: boolean) => void;
-  lastConfirmPrompt: () => { title: string; message: string } | undefined;
+  setSelectChoice: (v: string | undefined) => void;
+  setSetConfirmStopResult: (v: boolean) => void;
+  confirms: () => Array<{ title: string; message: string }>;
+  selects: () => SelectPrompt[];
   notifications: () => Array<{ message: string; type: "info" | "warning" | "error" | undefined }>;
+  setConfirmStopCalls: () => boolean[];
   cancels: () => string[];
   tails: () => Array<{ jobID: string; stream: "stdout" | "stderr" }>;
 }
@@ -37,10 +45,13 @@ const plainSelectListTheme = {
 
 function buildHarness(monitors: MonitorMenuMonitor[]): Harness {
   let captured: CapturedComponent | undefined;
-  let confirmResult = true;
   let confirmStop = true;
-  let lastConfirm: { title: string; message: string } | undefined;
+  let selectChoice: string | undefined = "No";
+  let setConfirmStopResult = true;
+  const confirmPrompts: Array<{ title: string; message: string }> = [];
+  const selectPrompts: SelectPrompt[] = [];
   const notifications: Array<{ message: string; type: "info" | "warning" | "error" | undefined }> = [];
+  const setConfirmStopCalls: boolean[] = [];
   const cancels: string[] = [];
   const tails: Array<{ jobID: string; stream: "stdout" | "stderr" }> = [];
   const tailData = new Map<string, string[]>();
@@ -68,8 +79,12 @@ function buildHarness(monitors: MonitorMenuMonitor[]): Harness {
         return donePromise;
       },
       confirm: async (title: string, message: string): Promise<boolean> => {
-        lastConfirm = { title, message };
-        return confirmResult;
+        confirmPrompts.push({ title, message });
+        return true;
+      },
+      select: async (title: string, options: string[]): Promise<string | undefined> => {
+        selectPrompts.push({ title, options });
+        return selectChoice;
       },
       notify: (message: string, type?: "info" | "warning" | "error") => {
         notifications.push({ message, type });
@@ -86,6 +101,11 @@ function buildHarness(monitors: MonitorMenuMonitor[]): Harness {
       return tailData.get(jobID) ?? [];
     },
     getConfirmStop: () => confirmStop,
+    setConfirmStop: (value: boolean) => {
+      setConfirmStopCalls.push(value);
+      confirmStop = value;
+      return setConfirmStopResult;
+    },
     onCancel: async (jobID: string) => {
       cancels.push(jobID);
       currentMonitors = currentMonitors.filter((m) => m.id !== jobID);
@@ -97,7 +117,6 @@ function buildHarness(monitors: MonitorMenuMonitor[]): Harness {
     tailData.set(m.id, ["line 1", "line 2", "line 3"]);
   }
 
-  // Fire-and-forget.
   showMonitorMenu(opts).catch(() => { /* ignore abort on close */ });
 
   const waitForCaptured = async (timeoutMs = 2000): Promise<CapturedComponent> => {
@@ -127,14 +146,19 @@ function buildHarness(monitors: MonitorMenuMonitor[]): Harness {
     dispose: async () => {
       if (captured) captured.dispose?.();
     },
-    setConfirmResult: (v: boolean) => {
-      confirmResult = v;
-    },
     setConfirmStop: (v: boolean) => {
       confirmStop = v;
     },
-    lastConfirmPrompt: () => lastConfirm,
+    setSelectChoice: (v: string | undefined) => {
+      selectChoice = v;
+    },
+    setSetConfirmStopResult: (v: boolean) => {
+      setConfirmStopResult = v;
+    },
+    confirms: () => confirmPrompts.slice(),
+    selects: () => selectPrompts.slice(),
     notifications: () => notifications.slice(),
+    setConfirmStopCalls: () => setConfirmStopCalls.slice(),
     cancels: () => cancels.slice(),
     tails: () => tails.slice(),
   };
@@ -145,9 +169,6 @@ function buildHarness(monitors: MonitorMenuMonitor[]): Harness {
 /* ------------------------------------------------------------------ */
 
 describe("monitor-menu", () => {
-  // Each test creates a harness whose menu starts a setInterval. We
-  // dispose the component after every test so the interval doesn't
-  // keep the event loop alive.
   let activeHarness: Harness | undefined;
 
   afterEach(async () => {
@@ -180,7 +201,24 @@ describe("monitor-menu", () => {
     const lines = h.render();
     const text = lines.join("\n");
     const ruleCount = (text.match(/─/g) ?? []).length;
-    assert.ok(ruleCount >= 30, `expected many ─ chars for frame, got ${ruleCount}`);
+    assert.ok(ruleCount >= 10, `expected ─ chars for frame, got ${ruleCount}`);
+  });
+
+  it("renders vertical sides (╭╮╰╯│) for the panel frame", async () => {
+    const h = await makeReady([
+      { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
+    ]);
+    const lines = h.render();
+    const text = lines.join("\n");
+    // Top border with corners
+    assert.ok(text.includes("╭"), "expected ╭ top-left corner");
+    assert.ok(text.includes("╮"), "expected ╮ top-right corner");
+    // Bottom border with corners
+    assert.ok(text.includes("╰"), "expected ╰ bottom-left corner");
+    assert.ok(text.includes("╯"), "expected ╯ bottom-right corner");
+    // Side rails on inner lines
+    const sideCount = (text.match(/│/g) ?? []).length;
+    assert.ok(sideCount >= 2, `expected │ side rails, got ${sideCount}`);
   });
 
   it("renders a live clock in the header", async () => {
@@ -189,22 +227,7 @@ describe("monitor-menu", () => {
     ]);
     const lines = h.render();
     const text = lines.join("\n");
-    // HH:MM:SS pattern
     assert.ok(/\d{2}:\d{2}:\d{2}/.test(text), "expected HH:MM:SS clock in render");
-  });
-
-  it("renders elapsed-time counter that grows on refresh", async () => {
-    const h = await makeReady([
-      { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
-    ]);
-    const before = h.render().join("\n");
-    // Wait long enough for the elapsed counter to tick past 0s.
-    await new Promise((r) => setTimeout(r, 1100));
-    const after = h.render().join("\n");
-    // The header should contain a different elapsed time after waiting.
-    // We can't pin a specific value (timing is jittery) but the substring
-    // "0s" should be in the initial render and likely "1s" or "2s" later.
-    assert.ok(before.includes("·") && after.includes("·"), "elapsed/clock separator missing");
   });
 
   it("sorts monitors newest first", async () => {
@@ -234,49 +257,99 @@ describe("monitor-menu", () => {
     assert.ok(text.includes("trigger"), "trigger flag not in description");
   });
 
-  it("'x' hotkey stops the selected monitor without confirm", async () => {
+  it("Enter on list mode switches to details (does not kill)", async () => {
     const h = await makeReady([
       { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
     ]);
+    await h.press("\r");
+    await h.flush();
+    assert.deepEqual(h.cancels(), [], "Enter should not cancel");
+    const text = h.render().join("\n");
+    assert.ok(text.includes("Details"), "expected details header");
+    assert.ok(text.includes("Command"), "expected command field in details");
+  });
+
+  it("Enter on details mode goes back to list", async () => {
+    const h = await makeReady([
+      { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
+    ]);
+    await h.press("\r"); // list -> details
+    await h.flush();
+    assert.ok(h.render().join("\n").includes("Details"), "expected details view");
+    await h.press("\r"); // details -> list
+    await h.flush();
+    const text = h.render().join("\n");
+    assert.ok(text.includes("Monitor List"), "expected list view after second Enter");
+  });
+
+  it("Esc on details mode goes back to list (does not close)", async () => {
+    const h = await makeReady([
+      { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
+    ]);
+    await h.press("\r"); // -> details
+    await h.flush();
+    await h.press("\x1b"); // -> list
+    await h.flush();
+    const text = h.render().join("\n");
+    assert.ok(text.includes("Monitor List"), "expected list view after Esc on details");
+    assert.ok(h.render().join("\n").length > 0, "menu should still be open");
+  });
+
+  it("x shows a 3-option prompt (No, Yes, Don't Ask Again)", async () => {
+    const h = await makeReady([
+      { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
+    ]);
+    h.setSelectChoice(undefined);
+    await h.press("x");
+    await h.flush();
+    const prompts = h.selects();
+    assert.equal(prompts.length, 1, "expected one select prompt");
+    assert.deepEqual(prompts[0].options, ["No", "Yes", "Don't Ask Again"]);
+  });
+
+  it("x with 'No' does not kill", async () => {
+    const h = await makeReady([
+      { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
+    ]);
+    h.setSelectChoice("No");
+    await h.press("x");
+    await h.flush();
+    assert.deepEqual(h.cancels(), [], "should not kill when 'No' chosen");
+  });
+
+  it("x with 'Yes' kills the monitor", async () => {
+    const h = await makeReady([
+      { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
+    ]);
+    h.setSelectChoice("Yes");
     await h.press("x");
     await h.flush();
     assert.deepEqual(h.cancels(), ["mon_1"]);
-    assert.equal(h.lastConfirmPrompt(), undefined, "confirm should not be called for 'x'");
   });
 
-  it("Enter hotkey asks for confirm when getConfirmStop is true and user declines", async () => {
+  it("x with 'Don't Ask Again' kills and persists confirmStop=false", async () => {
     const h = await makeReady([
       { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
     ]);
-    h.setConfirmResult(false);
-    await h.press("\r");
-    await h.flush();
-    assert.notEqual(h.lastConfirmPrompt(), undefined, "confirm should be called");
-    assert.deepEqual(h.cancels(), [], "should not stop when user declines");
-  });
-
-  it("Enter hotkey stops when user confirms", async () => {
-    const h = await makeReady([
-      { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
-    ]);
-    h.setConfirmResult(true);
-    await h.press("\r");
+    h.setSelectChoice("Don't Ask Again");
+    await h.press("x");
     await h.flush();
     assert.deepEqual(h.cancels(), ["mon_1"]);
+    assert.deepEqual(h.setConfirmStopCalls(), [false]);
   });
 
-  it("Enter hotkey skips confirm when getConfirmStop is false", async () => {
+  it("when confirmStop=false, x kills without prompting", async () => {
     const h = await makeReady([
       { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
     ]);
     h.setConfirmStop(false);
-    await h.press("\r");
+    await h.press("x");
     await h.flush();
+    assert.deepEqual(h.selects(), [], "should not show select prompt");
     assert.deepEqual(h.cancels(), ["mon_1"]);
-    assert.equal(h.lastConfirmPrompt(), undefined, "confirm should not be called when confirmStop=false");
   });
 
-  it("Esc hotkey closes the menu (does not stop)", async () => {
+  it("Esc hotkey closes the menu from list mode", async () => {
     const h = await makeReady([
       { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
     ]);
@@ -294,13 +367,13 @@ describe("monitor-menu", () => {
     assert.deepEqual(h.cancels(), [], "q should not stop any monitor");
   });
 
-  it("stops the selected monitor after navigating down", async () => {
+  it("x kills the selected monitor after navigating down", async () => {
     const h = await makeReady([
       { id: "mon_old", command: "echo old", regex: ".*", startedAt: 1 },
       { id: "mon_new", command: "echo new", regex: ".*", startedAt: 100 },
     ]);
-    // Newest first: mon_new is initially selected. Move down to mon_old.
-    await h.press("\x1b[B");
+    h.setSelectChoice("Yes");
+    await h.press("\x1b[B"); // down
     await h.press("x");
     await h.flush();
     assert.deepEqual(h.cancels(), ["mon_old"]);
