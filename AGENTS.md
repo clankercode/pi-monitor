@@ -47,7 +47,6 @@ Parameters:
 
 | Command | Description |
 |---------|-------------|
-| `/monitor --regex <pattern> -- <cmd>` | Start a monitor |
 | `/monitor-stop <jobID>` | Stop a running monitor |
 | `/monitor-list` | Interactive menu: list monitors, view tail, stop |
 
@@ -62,7 +61,7 @@ Interactive TUI for inspecting and managing running monitors.
 - **Up/Down**: navigate the list
 - **Enter / s**: stop the selected monitor (with confirm if `confirmStop` is true)
 - **x**: stop the selected monitor (skip confirm — kill semantics)
-- **Esc / q**: close the menu
+- **Esc / q / Left**: close the menu (or go back one level from details)
 
 ### Settings
 

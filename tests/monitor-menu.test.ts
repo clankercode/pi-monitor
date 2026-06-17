@@ -295,6 +295,30 @@ describe("monitor-menu", () => {
     assert.ok(h.render().join("\n").length > 0, "menu should still be open");
   });
 
+  it("Left arrow on details mode goes back to list (does not close)", async () => {
+    const h = await makeReady([
+      { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
+    ]);
+    await h.press("\r"); // -> details
+    await h.flush();
+    assert.ok(h.render().join("\n").includes("Details"), "expected details view");
+    // \x1b[D is the standard left-arrow CSI sequence
+    await h.press("\x1b[D");
+    await h.flush();
+    const text = h.render().join("\n");
+    assert.ok(text.includes("Monitor List"), "expected list view after left on details");
+    assert.ok(h.render().join("\n").length > 0, "menu should still be open");
+  });
+
+  it("Left arrow on list mode closes the menu (does not kill)", async () => {
+    const h = await makeReady([
+      { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
+    ]);
+    await h.press("\x1b[D");
+    await h.flush();
+    assert.deepEqual(h.cancels(), [], "left arrow should not stop any monitor");
+  });
+
   it("x shows a 3-option prompt (No, Yes, Don't Ask Again)", async () => {
     const h = await makeReady([
       { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },

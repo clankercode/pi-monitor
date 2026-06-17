@@ -356,6 +356,15 @@ export async function showMonitorMenu(opts: ShowMonitorMenuOptions): Promise<voi
       // "No" or Esc (undefined) → do nothing.
     }
 
+    function goBack(): void {
+      if (mode === "details") {
+        mode = "list";
+        container = buildContainer();
+        return;
+      }
+      closeMenu();
+    }
+
     return {
       render: (w: number) => container.render(w),
       invalidate: () => container.invalidate(),
@@ -364,13 +373,8 @@ export async function showMonitorMenu(opts: ShowMonitorMenuOptions): Promise<voi
         // may flush buffered keys during teardown, and we don't want them
         // leaking to the input box.
         if (closed) return;
-        if (matchesKey(data, Key.escape)) {
-          if (mode === "details") {
-            mode = "list";
-            container = buildContainer();
-            return;
-          }
-          closeMenu();
+        if (matchesKey(data, Key.escape) || matchesKey(data, Key.left)) {
+          goBack();
           return;
         }
         if (matchesKey(data, "q") && mode === "list") {

@@ -287,28 +287,6 @@ export default function (pi: ExtensionAPI) {
   /* Slash commands                                                   */
   /* ---------------------------------------------------------------- */
 
-  pi.registerCommand("monitor", {
-    description: "Watch a command's output for a regex (--regex <pattern> -- <command>)",
-    handler: async (args, ctx) => {
-      const parsed = parseMonitorArgs(args);
-      if (typeof parsed === "string") {
-        ctx.ui.notify(parsed, "error");
-        return;
-      }
-      const result = await handleMonitor(
-        ctx,
-        parsed.command,
-        parsed.regex,
-        parsed.before,
-        parsed.after,
-        parsed.debounceMs,
-        parsed.label,
-        parsed.triggerTurn,
-      );
-      ctx.ui.notify(result);
-    },
-  });
-
   pi.registerCommand("monitor-stop", {
     description: "Stop a running monitor (/monitor-stop <jobID>)",
     handler: async (args, ctx) => {
@@ -520,58 +498,3 @@ function clampInt(value: number, min: number, max: number): number {
 }
 
 
-interface ParsedMonitor {
-  command: string;
-  regex: RegExp;
-  before: number;
-  after: number;
-  debounceMs: number;
-  label?: string;
-  triggerTurn?: boolean;
-}
-
-function parseMonitorArgs(args: string): ParsedMonitor | string {
-  const parts = args.trim().split(/\s+/);
-  let command = "";
-  let regexStr = "";
-  let before = 10;
-  let after = 10;
-  let debounceMs = 5000;
-  let label: string | undefined;
-  let triggerTurn = false;
-
-  let i = 0;
-  while (i < parts.length) {
-    const arg = parts[i];
-    if (arg === "--regex" && i + 1 < parts.length) {
-      regexStr = parts[++i];
-    } else if (arg === "--before" && i + 1 < parts.length) {
-      before = parseInt(parts[++i], 10);
-    } else if (arg === "--after" && i + 1 < parts.length) {
-      after = parseInt(parts[++i], 10);
-    } else if (arg === "--debounce" && i + 1 < parts.length) {
-      debounceMs = parseInt(parts[++i], 10) * 1000;
-    } else if (arg === "--label" && i + 1 < parts.length) {
-      label = parts[++i];
-    } else if (arg === "--trigger") {
-      triggerTurn = true;
-    } else if (arg === "--") {
-      command = parts.slice(i + 1).join(" ");
-      break;
-    } else if (!arg.startsWith("--") && !command) {
-      command = parts.slice(i).join(" ");
-      break;
-    }
-    i++;
-  }
-
-  if (!regexStr) return "Missing --regex <pattern>";
-  if (!command) return "Missing command (after --)";
-
-  try {
-    const regex = new RegExp(regexStr);
-    return { command, regex, before, after, debounceMs, label, triggerTurn };
-  } catch {
-    return `Invalid regex: ${regexStr}`;
-  }
-}
