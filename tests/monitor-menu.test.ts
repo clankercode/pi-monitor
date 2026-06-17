@@ -33,6 +33,8 @@ interface Harness {
   setConfirmStopCalls: () => boolean[];
   cancels: () => string[];
   tails: () => Array<{ jobID: string; stream: "stdout" | "stderr" }>;
+  /** Texts passed to the muted color function (for verifying gray-out). */
+  mutedCalls: () => string[];
 }
 
 const plainSelectListTheme = {
@@ -54,6 +56,7 @@ function buildHarness(monitors: MonitorMenuMonitor[]): Harness {
   const setConfirmStopCalls: boolean[] = [];
   const cancels: string[] = [];
   const tails: Array<{ jobID: string; stream: "stdout" | "stderr" }> = [];
+  const mutedCalls: string[] = [];
   const tailData = new Map<string, string[]>();
   let currentMonitors: MonitorMenuMonitor[] = monitors;
 
@@ -101,6 +104,10 @@ function buildHarness(monitors: MonitorMenuMonitor[]): Harness {
       return tailData.get(jobID) ?? [];
     },
     getConfirmStop: () => confirmStop,
+    getMutedColor: (text: string) => {
+      mutedCalls.push(text);
+      return text;
+    },
     setConfirmStop: (value: boolean) => {
       setConfirmStopCalls.push(value);
       confirmStop = value;
@@ -161,6 +168,7 @@ function buildHarness(monitors: MonitorMenuMonitor[]): Harness {
     setConfirmStopCalls: () => setConfirmStopCalls.slice(),
     cancels: () => cancels.slice(),
     tails: () => tails.slice(),
+    mutedCalls: () => mutedCalls.slice(),
   };
 }
 
@@ -317,6 +325,45 @@ describe("monitor-menu", () => {
     await h.press("\x1b[D");
     await h.flush();
     assert.deepEqual(h.cancels(), [], "left arrow should not stop any monitor");
+  });
+
+  it("Right arrow on list mode switches to details (does not kill)", async () => {
+    const h = await makeReady([
+      { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
+    ]);
+    await h.press("\x1b[C"); // right arrow CSI
+    await h.flush();
+    assert.deepEqual(h.cancels(), [], "right arrow should not cancel");
+    const text = h.render().join("\n");
+    assert.ok(text.includes("Details"), "expected details view");
+    assert.ok(text.includes("Command"), "expected command field in details");
+  });
+
+  it("Right arrow on details mode goes back to list", async () => {
+    const h = await makeReady([
+      { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
+    ]);
+    await h.press("\x1b[C"); // list -> details
+    await h.flush();
+    assert.ok(h.render().join("\n").includes("Details"), "expected details view");
+    await h.press("\x1b[C"); // details -> list
+    await h.flush();
+    const text = h.render().join("\n");
+    assert.ok(text.includes("Monitor List"), "expected list view after right arrow on details");
+  });
+
+  it("hint footer text is wrapped in the muted color function", async () => {
+    const h = await makeReady([
+      { id: "mon_1", command: "echo 1", regex: ".*", startedAt: 1 },
+    ]);
+    // Render triggers at least one buildContainer which calls mutedColor for the hint.
+    h.render();
+    const mutedTexts = h.mutedCalls();
+    assert.ok(mutedTexts.length > 0, "expected muted color to be called");
+    const joined = mutedTexts.join("\n");
+    assert.ok(joined.includes("\u2192/Enter"), "hint should mention \u2192/Enter for forward");
+    assert.ok(joined.includes("\u2190/Esc"), "hint should mention \u2190/Esc for back");
+    assert.ok(joined.includes("x: kill"), "hint should mention x: kill");
   });
 
   it("x shows a 3-option prompt (No, Yes, Don't Ask Again)", async () => {

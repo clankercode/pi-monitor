@@ -61,6 +61,8 @@ export interface ShowMonitorMenuOptions {
   getSelectListTheme?: () => ReturnType<typeof getSelectListTheme>;
   /** Optional border color function for the panel frame. Defaults to pass-through. */
   getBorderColor?: (text: string) => string;
+  /** Optional muted/dim color for the hint footer text. Defaults to pass-through. */
+  getMutedColor?: (text: string) => string;
   /** Live source for the current monitor set — re-queried on every refresh. */
   getMonitors: () => MonitorMenuMonitor[];
   /** Tail snapshot provider — called per monitor per refresh. */
@@ -173,6 +175,7 @@ export async function showMonitorMenu(opts: ShowMonitorMenuOptions): Promise<voi
     const menuOpenedAt = Date.now();
     const themeFn = opts.getSelectListTheme ?? getSelectListTheme;
     const borderColor = opts.getBorderColor ?? ((t: string) => t);
+    const mutedColor = opts.getMutedColor ?? ((t: string) => t);
 
     if (initialMonitors.length === 0) {
       const container = new Container();
@@ -241,7 +244,7 @@ export async function showMonitorMenu(opts: ShowMonitorMenuOptions): Promise<voi
         }
       }
       c.addChild(new Spacer(1));
-      const hint = "Enter: details  ·  x: kill  ·  Esc/q: close  ·  (newest first)";
+      const hint = mutedColor("↑↓: navigate  ·  →/Enter: details  ·  ←/Esc/q: close  ·  x: kill  ·  (newest first)");
       c.addChild(new Text(hint, 0, 0));
       return c;
     }
@@ -285,7 +288,7 @@ export async function showMonitorMenu(opts: ShowMonitorMenuOptions): Promise<voi
       }
 
       c.addChild(new Spacer(1));
-      c.addChild(new Text("Enter/Esc: back to list  ·  x: kill", 0, 0));
+      c.addChild(new Text(mutedColor("←/Esc/Enter: back to list  ·  x: kill"), 0, 0));
       return c;
     }
 
@@ -365,6 +368,17 @@ export async function showMonitorMenu(opts: ShowMonitorMenuOptions): Promise<voi
       closeMenu();
     }
 
+    function goForward(): void {
+      if (mode === "list") {
+        mode = "details";
+        container = buildContainer();
+        return;
+      }
+      // details mode: Enter/Right goes back to list
+      mode = "list";
+      container = buildContainer();
+    }
+
     return {
       render: (w: number) => container.render(w),
       invalidate: () => container.invalidate(),
@@ -385,15 +399,8 @@ export async function showMonitorMenu(opts: ShowMonitorMenuOptions): Promise<voi
           void killSelected();
           return;
         }
-        if (matchesKey(data, Key.enter)) {
-          if (mode === "list") {
-            mode = "details";
-            container = buildContainer();
-            return;
-          }
-          // details mode: Enter goes back to list
-          mode = "list";
-          container = buildContainer();
+        if (matchesKey(data, Key.enter) || matchesKey(data, Key.right)) {
+          goForward();
           return;
         }
         list.handleInput(data);
