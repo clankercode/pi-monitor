@@ -174,8 +174,9 @@ export default function (pi: ExtensionAPI) {
             jobID,
           });
           if (triggerTurn) {
-            // When idle: use followUp so the renderer shows the compact view AND
-            // triggerTurn wakes the LLM. When busy: steer interrupts after current tools.
+            // Deliver as steering input that wakes/continues the parent turn.
+            // This works whether the session is idle or busy, and preserves the
+            // compact custom-message renderer.
             pi.sendMessage(
               {
                 customType: "pi-monitor",
@@ -183,9 +184,7 @@ export default function (pi: ExtensionAPI) {
                 display: true,
                 details,
               },
-              ctx.isIdle()
-                ? { triggerTurn: true, deliverAs: "followUp" }
-                : { deliverAs: "steer" },
+              { deliverAs: "steer", triggerTurn: true },
             );
           } else {
             pi.sendMessage({
