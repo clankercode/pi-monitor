@@ -58,21 +58,29 @@ export function buildCompactLine(
 
   const label = details?.label ?? details?.jobID ?? KIND;
   const matchCount = details?.matchCount ?? 1;
+  const lineCount = details?.lineCount ?? 1;
   const truncated = details?.truncated ?? false;
 
-  // Pick the first non-empty line as the snippet.
-  const firstLine = content
+  const contentLines = content
     .split("\n")
     .map((l: string) => l.trim())
-    .find((l: string) => l.length > 0) ?? "";
+    .filter((l: string) => l.length > 0);
 
-  // Collapse whitespace in the snippet so it doesn't blow out the line.
-  const snippet = firstLine.replace(/\s+/g, " ").trim();
+  // Join a few lines so multi-line monitor batches read as one grouped event
+  // instead of a stack of repeated monitor rows.
+  const snippet = contentLines
+    .slice(0, 3)
+    .map((line: string) => line.replace(/\s+/g, " ").trim())
+    .join(" ↵ ");
 
   const parts: string[] = [];
 
   // Prefix: 1-space indent + icon + kind + label
   parts.push(" " + theme.fg("accent", `${ICON} ${KIND}`) + theme.fg("text", ` · ${label}`));
+
+  if (lineCount > 1) {
+    parts.push(theme.fg("muted", `${lineCount} lines`));
+  }
 
   // Match count when there are multiple matches.
   if (matchCount > 1) {

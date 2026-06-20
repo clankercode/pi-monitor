@@ -57,6 +57,19 @@ describe('buildCompactLine', () => {
     assert.ok(buildCompactLine(multi, plainTheme, 200).includes('+3 matches'));
   });
 
+  it('summarizes multi-line batches with line count and joined preview', () => {
+    const msg = makeMessage('first matched line\nsecond matched line\nthird matched line', {
+      label: 'room monitor',
+      matchCount: 3,
+      lineCount: 3,
+    });
+
+    const line = buildCompactLine(msg, plainTheme, 200);
+
+    assert.ok(line.includes('3 lines'), 'should show the grouped line count');
+    assert.ok(line.includes('first matched line ↵ second matched line'), 'should preview multiple lines together');
+  });
+
   it('shows truncated indicator when truncated', () => {
     const msg = makeMessage('match', { truncated: true });
     assert.ok(buildCompactLine(msg, plainTheme, 200).includes('truncated'));

@@ -10,7 +10,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { ProcessRunner } from "../src/runner/process-runner.ts";
 import { MonitorEngine, type MonitorWindow } from "../src/runner/monitor-engine.ts";
 import { vetRegexPattern, close as closeRedos } from "../src/runner/redos.ts";
-import { formatDelivery, formatMonitorXml } from "../src/delivery-format.ts";
+import { MonitorDeliveryBatcher } from "../src/delivery-batcher.ts";
+import { formatDelivery } from "../src/delivery-format.ts";
 import type { OutputEvent } from "../src/types.ts";
 import {
   MIN_MONITOR_DEBOUNCE_S,
@@ -70,6 +71,15 @@ export default function (pi: ExtensionAPI) {
   let runner: ProcessRunner | null = null;
   let engines: Map<string, MonitorEngine> | null = null;
   let monitorCounter = 0;
+  const deliveryBatcher = new MonitorDeliveryBatcher({
+    send: (message, triggerTurn) => {
+      if (triggerTurn) {
+        pi.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
+      } else {
+        pi.sendMessage(message);
+      }
+    },
+  });
 
   interface MonitorInfo {
     id: string;
@@ -114,6 +124,7 @@ export default function (pi: ExtensionAPI) {
       // We rely on process group cleanup via SIGTERM on session exit.
     }
 
+    deliveryBatcher.flush();
     await closeRedos();
 
     engines = null;
@@ -167,33 +178,11 @@ export default function (pi: ExtensionAPI) {
             lineCount: window.events.length,
             truncated: window.truncated,
           };
-          // Wrap the raw window text in a minimal XML envelope (id + at only).
-          // The LLM can call MonitorList for command/regex/label/match counts.
-          const xml = formatMonitorXml({
+          deliveryBatcher.enqueue({
             raw: lines,
-            jobID,
+            details,
+            triggerTurn: triggerTurn ?? false,
           });
-          if (triggerTurn) {
-            // Deliver as steering input that wakes/continues the parent turn.
-            // This works whether the session is idle or busy, and preserves the
-            // compact custom-message renderer.
-            pi.sendMessage(
-              {
-                customType: "pi-monitor",
-                content: xml,
-                display: true,
-                details,
-              },
-              { deliverAs: "steer", triggerTurn: true },
-            );
-          } else {
-            pi.sendMessage({
-              customType: "pi-monitor",
-              content: xml,
-              display: true,
-              details,
-            });
-          }
         },
       });
 
