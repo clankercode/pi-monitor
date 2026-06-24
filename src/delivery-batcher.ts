@@ -28,6 +28,7 @@ interface PendingGroup {
 export class MonitorDeliveryBatcher {
   #pending: PendingGroup[] = [];
   #flushScheduled = false;
+  #invalidated = false;
   readonly #schedule: (fn: () => void) => void;
   readonly #send: (message: MonitorDeliveryMessage, triggerTurn: boolean) => void;
 
@@ -36,7 +37,18 @@ export class MonitorDeliveryBatcher {
     this.#send = options.send;
   }
 
+  /**
+   * Mark the batcher as invalidated. After this, no more messages will be sent.
+   * Call this when the extension context becomes stale (e.g., session replacement).
+   */
+  invalidate(): void {
+    this.#invalidated = true;
+    this.#pending = [];
+    this.#flushScheduled = false;
+  }
+
   enqueue(batch: MonitorDeliveryBatch): void {
+    if (this.#invalidated) return;
     const last = this.#pending.at(-1);
     if (last && canMerge(last, batch)) {
       last.rawParts.push(batch.raw);
@@ -56,7 +68,7 @@ export class MonitorDeliveryBatcher {
   }
 
   flush(): void {
-    if (this.#pending.length === 0) {
+    if (this.#invalidated || this.#pending.length === 0) {
       this.#flushScheduled = false;
       return;
     }

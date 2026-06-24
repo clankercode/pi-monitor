@@ -111,6 +111,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
+    // Invalidate the batcher first to prevent any scheduled flushes from
+    // trying to send on a stale context after session replacement.
+    deliveryBatcher.invalidate();
+
     // Destroy all monitor engines
     if (engines) {
       for (const engine of engines.values()) engine.destroy();
@@ -124,7 +128,6 @@ export default function (pi: ExtensionAPI) {
       // We rely on process group cleanup via SIGTERM on session exit.
     }
 
-    deliveryBatcher.flush();
     await closeRedos();
 
     engines = null;
