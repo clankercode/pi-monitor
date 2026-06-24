@@ -75,4 +75,37 @@ describe('MonitorDeliveryBatcher', () => {
 
     assert.deepStrictEqual(sent.map((m) => m.details.jobID), ['mon_1', 'mon_2']);
   });
+
+  it('drops queued deliveries after invalidation before scheduled flush', () => {
+    const sent: Array<{ content: string }> = [];
+    const scheduled: Array<() => void> = [];
+    const batcher = new MonitorDeliveryBatcher({
+      schedule: (fn) => { scheduled.push(fn); },
+      send: (message) => { sent.push({ content: message.content }); },
+    });
+
+    batcher.enqueue({ raw: 'late line', details: makeDetails(), triggerTurn: false });
+    assert.strictEqual(scheduled.length, 1, 'initial delivery schedules a flush');
+
+    batcher.invalidate();
+    scheduled[0]!();
+
+    assert.strictEqual(sent.length, 0, 'invalidated batcher must not send through stale ctx');
+  });
+
+  it('ignores new deliveries after invalidation', () => {
+    const sent: Array<{ content: string }> = [];
+    const scheduled: Array<() => void> = [];
+    const batcher = new MonitorDeliveryBatcher({
+      schedule: (fn) => { scheduled.push(fn); },
+      send: (message) => { sent.push({ content: message.content }); },
+    });
+
+    batcher.invalidate();
+    batcher.enqueue({ raw: 'late line', details: makeDetails(), triggerTurn: false });
+    batcher.flush();
+
+    assert.strictEqual(scheduled.length, 0, 'invalidated batcher must not schedule stale ctx work');
+    assert.strictEqual(sent.length, 0, 'invalidated batcher must drop stale ctx work');
+  });
 });
