@@ -42,6 +42,7 @@ Parameters:
 - `after` (optional) — lines of context after match (0-200, default: 10)
 - `debounceSeconds` (optional) — debounce window (1-60, default: 5)
 - `label` (optional) — human-readable label
+- `triggerTurn` (optional, default: `true`) — wake/steer the assistant when matching output arrives; set `false` for display-only logging
 
 ## Commands
 

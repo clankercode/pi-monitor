@@ -38,6 +38,7 @@ import { getConfirmStop, setConfirmStop } from "../src/settings.ts";
 
 const MAX_CONTEXT_LINES = 200;
 const STATUSLINE_KEY = "/m";
+const DEFAULT_TRIGGER_TURN = true;
 
 /* ------------------------------------------------------------------ */
   /* ------------------------------------------------------------------ */
@@ -52,7 +53,7 @@ const STATUSLINE_KEY = "/m";
     after: Type.Optional(Type.Number({ description: "Lines of context after match (default: 10)" })),
     debounceSeconds: Type.Optional(Type.Number({ description: "Debounce window in seconds (1-60, default: 5)" })),
     label: Type.Optional(Type.String({ description: "Human-readable label for this monitor" })),
-    triggerTurn: Type.Optional(Type.Boolean({ description: "If true, deliver the monitor output as a user turn that triggers an LLM response (default: false)" })),
+    triggerTurn: Type.Optional(Type.Boolean({ default: DEFAULT_TRIGGER_TURN, description: "If true, deliver monitor output as a user turn that triggers an LLM response (default: true; set false to only display/log)" })),
   });
 
   const MonitorStopSchema = Type.Object({
@@ -158,6 +159,7 @@ export default function (pi: ExtensionAPI) {
 
     await vetRegexPattern(regex.source, regex.flags);
 
+    const shouldTriggerTurn = triggerTurn ?? DEFAULT_TRIGGER_TURN;
     const jobID = `mon_${++monitorCounter}`;
     let engine: MonitorEngine | null = null;
     let onOutput: ((event: OutputEvent) => void) | null = null;
@@ -184,7 +186,7 @@ export default function (pi: ExtensionAPI) {
           deliveryBatcher.enqueue({
             raw: lines,
             details,
-            triggerTurn: triggerTurn ?? false,
+            triggerTurn: shouldTriggerTurn,
           });
         },
       });
@@ -198,7 +200,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     enginesRef.set(jobID, engine);
-    activeMonitors.set(jobID, { id: jobID, command, regex: regex.source, label, triggerTurn, startedAt: Date.now() });
+    activeMonitors.set(jobID, { id: jobID, command, regex: regex.source, label, triggerTurn: shouldTriggerTurn, startedAt: Date.now() });
     updateStatusline();
 
     onOutput = (event: OutputEvent) => {
@@ -341,7 +343,7 @@ export default function (pi: ExtensionAPI) {
       const after = (params as MonitorToolParams).after;
       const debounceSeconds = (params as MonitorToolParams).debounceSeconds;
       const label = (params as MonitorToolParams).label;
-      const triggerTurn = (params as MonitorToolParams).triggerTurn ?? false;
+      const triggerTurn = (params as MonitorToolParams).triggerTurn ?? DEFAULT_TRIGGER_TURN;
 
       // Validate regex
       if (regexStr.length > MAX_REGEX_PATTERN_LENGTH) {
