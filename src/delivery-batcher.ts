@@ -40,9 +40,20 @@ export class MonitorDeliveryBatcher {
   /**
    * Mark the batcher as invalidated. After this, no more messages will be sent.
    * Call this when the extension context becomes stale (e.g., session replacement).
+   * Use {@link reset} on the next session_start so deliveries work again.
    */
   invalidate(): void {
     this.#invalidated = true;
+    this.#pending = [];
+    this.#flushScheduled = false;
+  }
+
+  /**
+   * Clear invalidation and any pending state so the batcher can deliver again
+   * (e.g. after session_start following a previous session_shutdown).
+   */
+  reset(): void {
+    this.#invalidated = false;
     this.#pending = [];
     this.#flushScheduled = false;
   }

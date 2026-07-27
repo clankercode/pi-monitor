@@ -1,7 +1,10 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { OutputEvent } from '../src/types.ts';
-import { ProcessRunner } from '../src/runner/process-runner.ts';
+import { ProcessRunner, type ProcessExitResult } from '../src/runner/process-runner.ts';
 import { PROCESS_OUTPUT_CAP_LINES } from '../src/limits.ts';
 
 function waitForOutput(runner: ProcessRunner, jobID: string, maxLines = 4): Promise<string[]> {
@@ -20,39 +23,52 @@ function waitForOutput(runner: ProcessRunner, jobID: string, maxLines = 4): Prom
   });
 }
 
-function waitForExit(runner: ProcessRunner, jobID: string, exitPromise: Promise<number | null>): Promise<number | null> {
-  return exitPromise.then((code) => {
+function waitForExit(
+  runner: ProcessRunner,
+  jobID: string,
+  exitPromise: Promise<ProcessExitResult>,
+): Promise<ProcessExitResult> {
+  return exitPromise.then((result) => {
     runner.dispose(jobID);
-    return code;
+    return result;
   });
 }
 
 describe('ProcessRunner', () => {
   let runner: ProcessRunner;
+  let sessionDir: string;
 
   beforeEach(() => {
-    runner = new ProcessRunner();
+    sessionDir = join(tmpdir(), `pi-monitor-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    runner = new ProcessRunner(sessionDir);
   });
 
   afterEach(() => {
+    runner.disposeAll();
     runner.removeAllListeners();
+    try {
+      rmSync(sessionDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
   });
 
   it('spawns with /bin/sh -c and detached group', async () => {
     const id = 'pr_1';
     const { exitPromise } = runner.run(id, 'echo hello');
-    const code = await waitForExit(runner, id, exitPromise);
-    assert.equal(code, 0);
+    const result = await waitForExit(runner, id, exitPromise);
+    assert.equal(result.code, 0);
+    assert.equal(result.signal, null);
   });
 
   it('creates exit promise before listeners', async () => {
     const id = 'pr_fast';
     const { exitPromise } = runner.run(id, 'true');
-    const code = await Promise.race([
+    const result = await Promise.race([
       exitPromise,
-      new Promise<number>((r) => setTimeout(() => r(-1), 2000)),
+      new Promise<ProcessExitResult>((r) => setTimeout(() => r({ code: -1, signal: null }), 2000)),
     ]);
-    assert.equal(code, 0);
+    assert.equal(result.code, 0);
     runner.dispose(id);
   });
 
@@ -153,6 +169,47 @@ describe('ProcessRunner', () => {
     runner.dispose(id);
   });
 
+  it('writes full output log with stream tags', async () => {
+    const id = 'log_1';
+    const { exitPromise, outputPath } = runner.run(id, 'echo hello; echo warn >&2');
+    await exitPromise;
+    assert.ok(existsSync(outputPath));
+    // Wait for log stream to flush both lines (end is async after close).
+    const deadline = Date.now() + 2_000;
+    let content = '';
+    while (Date.now() < deadline) {
+      content = readFileSync(outputPath, 'utf8');
+      if (content.includes('[stdout] hello') && content.includes('[stderr] warn')) break;
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    assert.ok(content.includes('[stdout] hello'), `stdout missing in: ${JSON.stringify(content)}`);
+    assert.ok(content.includes('[stderr] warn'), `stderr missing in: ${JSON.stringify(content)}`);
+    assert.equal(runner.outputPath(id), outputPath);
+    runner.dispose(id);
+    // Path still resolvable after dispose
+    assert.equal(runner.outputPath(id), outputPath);
+    assert.ok(existsSync(outputPath));
+  });
+
+  it('returns non-zero exit code', async () => {
+    const id = 'exit_7';
+    const { exitPromise } = runner.run(id, 'exit 7');
+    const result = await waitForExit(runner, id, exitPromise);
+    assert.equal(result.code, 7);
+  });
+
+  it('tailCombined returns stream-tagged chronological lines', async () => {
+    const id = 'combined';
+    const { exitPromise } = runner.run(id, 'echo a; echo b');
+    await exitPromise;
+    const combined = runner.tailCombined(id, 10);
+    assert.ok(combined.some((l) => l.includes('[stdout] a')));
+    assert.ok(combined.some((l) => l.includes('[stdout] b')));
+    const last1 = runner.tailCombined(id, 1);
+    assert.equal(last1.length, 1);
+    runner.dispose(id);
+  });
+
   it('cancel throws for unknown jobID', async () => {
     await assert.rejects(() => runner.cancel('ghost_0'), { message: /not found/ });
   });
@@ -175,8 +232,11 @@ describe('ProcessRunner', () => {
 
   it('cancel uses SIGTERM + SIGKILL to process group', async () => {
     const id = 'group-kill';
-    runner.run(id, 'sleep 60');
+    const { exitPromise } = runner.run(id, 'sleep 60');
     await runner.cancel(id);
+    const result = await exitPromise;
+    // Killed processes typically report null code and a signal
+    assert.ok(result.code === null || result.code !== 0 || result.signal !== null);
     runner.dispose(id);
   });
 
@@ -185,5 +245,21 @@ describe('ProcessRunner', () => {
     runner.run(id, 'sleep 60');
     runner.dispose(id);
     assert.deepStrictEqual(runner.tail(id, 'stdout'), []);
+  });
+
+  it('dispose SIGTERMs without blocking on exitPromise', async () => {
+    const id = 'ds_async';
+    const { exitPromise } = runner.run(id, 'sleep 60');
+    const started = Date.now();
+    runner.dispose(id);
+    const elapsed = Date.now() - started;
+    // dispose must return immediately (not wait for SIGKILL grace)
+    assert.ok(elapsed < 500, `dispose blocked for ${elapsed}ms`);
+    // Process should still be killed asynchronously; exitPromise may resolve later.
+    // Do not hang the test suite waiting the full grace — best-effort wait.
+    await Promise.race([
+      exitPromise,
+      new Promise((r) => setTimeout(r, 200)),
+    ]);
   });
 });

@@ -263,7 +263,8 @@ export async function vetRegexPattern(
 export function close(): Promise<void> {
   const pool = _sharedPool;
   _sharedPool = null;
-  _vetCache.clear();
+  // Keep cache: pattern safety does not change across session restarts.
+  // Clearing it forced every session_start under tests to re-spawn workers.
   return pool ? pool.close() : Promise.resolve();
 }
 

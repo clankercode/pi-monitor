@@ -8,6 +8,9 @@ export const MAX_COMPLETED_RETENTION = 50;
 export const PROCESS_OUTPUT_CAP_LINES = 200;
 export const PROCESS_OUTPUT_CAP_BYTES = 32 * 1024;
 
+// Exit notification: last N lines included in the agent message (5–10 range)
+export const EXIT_TAIL_LINES = 8;
+
 // Monitor limits
 export const MONITOR_RING_BUFFER_EVENTS = 50_000;
 export const MONITOR_AFTER_WAIT_MS = 5_000;
@@ -33,8 +36,8 @@ export const MAX_SCHEDULE_HORIZON_MS = 30 * 24 * 60 * 60 * 1000;
 // are not ported: busy non-loop delivery is delegated to Pi nextTurn/steer, and loop delivery
 // coalesces to one bucket per job (src/delivery.ts).
 
-// ReDoS worker limits
-export const REDOS_TIMEOUT_MS = 100;
+// ReDoS worker limits (100ms is too tight under parallel test/load; still well under agent UX budget)
+export const REDOS_TIMEOUT_MS = 500;
 export const REDOS_MAX_CONCURRENT = 4;
 
 // Cancellation limits

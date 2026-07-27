@@ -22,6 +22,8 @@ export interface MonitorDetails {
   debounceSeconds: number;
   label?: string;
   triggerTurn?: boolean;
+  jobID?: string;
+  outputPath?: string;
 }
 
 export interface MonitorStopDetails {
@@ -35,6 +37,16 @@ export interface ActiveMonitorInfo {
   label?: string;
   triggerTurn?: boolean;
   uptimeSec: number;
+  /** Job kind: monitor (regex) or background (exit-only). */
+  kind?: "mon" | "bg";
+  outputPath?: string;
+}
+
+export interface BackgroundDetails {
+  command: string;
+  label?: string;
+  jobID?: string;
+  outputPath?: string;
 }
 
 export interface MonitorListDetails {
@@ -217,6 +229,45 @@ export function renderMonitorListResult(
   }
 
   return container;
+}
+
+// ── Background tool: call + result renderers ─────────────────────────────────
+
+/**
+ * One-line preview shown while the Background tool is executing.
+ *  ◈ background · label · command
+ */
+export function renderBackgroundCall(args: BackgroundDetails, theme: Theme): Component {
+  const { command, label } = args;
+  const parts: string[] = [INDENT_DIAMOND, theme.fg("accent", "◈ background")];
+  if (label) parts.push(theme.fg("text", ` · ${label}`));
+  parts.push(theme.fg("borderMuted", " · "));
+  parts.push(theme.fg("muted", command));
+  return new Text(parts.join(""), 0, 0);
+}
+
+/**
+ * Result shown when a background job starts successfully.
+ *
+ *   ◈ background started · label
+ */
+export function renderBackgroundResult(
+  details: BackgroundDetails,
+  isError: boolean,
+  _isPartial: boolean,
+  theme: Theme,
+): Component {
+  if (isError || !details.command) {
+    return new Text(theme.fg("error", "Background error"), 0, 0);
+  }
+  const { label } = details;
+  return new Text(
+    INDENT_DIAMOND +
+      (label
+        ? theme.fg("accent", "◈ background") + theme.fg("success", " started") + theme.fg("borderMuted", " · ") + theme.fg("text", label)
+        : theme.fg("accent", "◈ background") + theme.fg("success", " started")),
+    0, 0,
+  );
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

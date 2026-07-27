@@ -1,9 +1,13 @@
 /**
- * pi-monitor — background process monitoring with regex matching.
+ * pi-monitor — background process monitoring with regex matching,
+ * plus fire-and-forget background shell jobs.
  *
- * Single tool: monitor. Runs a shell command in the background, watches
- * stdout for regex matches, and delivers matching windows (with before/after
- * context) to the agent session.
+ * Tools:
+ * - Monitor: run a shell command, deliver regex-matching stdout windows, notify on exit.
+ * - Background: run a shell command with no intermediate deliveries; notify on exit only.
+ * - MonitorStop / MonitorList: stop or list any job (mon_* or bg_*).
+ *
+ * Agents are notified automatically on match and on exit — do not poll.
  */
 import { Type, type Static } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -11,12 +15,14 @@ import { ProcessRunner } from "../src/runner/process-runner.ts";
 import { MonitorEngine, type MonitorWindow } from "../src/runner/monitor-engine.ts";
 import { vetRegexPattern, close as closeRedos } from "../src/runner/redos.ts";
 import { MonitorDeliveryBatcher } from "../src/delivery-batcher.ts";
-import { formatDelivery } from "../src/delivery-format.ts";
+import { formatMonitorExitXml } from "../src/delivery-format.ts";
 import type { OutputEvent } from "../src/types.ts";
 import {
   MIN_MONITOR_DEBOUNCE_S,
   MAX_MONITOR_DEBOUNCE_S,
   MAX_REGEX_PATTERN_LENGTH,
+  MAX_ACTIVE_JOBS,
+  EXIT_TAIL_LINES,
 } from "../src/limits.ts";
 import {
   registerCompactMonitorRenderer,
@@ -28,11 +34,14 @@ import {
   renderMonitorStopResult,
   renderMonitorListCall,
   renderMonitorListResult,
+  renderBackgroundCall,
+  renderBackgroundResult,
   formatUptime,
   type MonitorDetails,
   type MonitorStopDetails,
   type MonitorListDetails,
   type ActiveMonitorInfo,
+  type BackgroundDetails,
 } from "../src/ui/monitor-tool-renderers.ts";
 import { getConfirmStop, setConfirmStop } from "../src/settings.ts";
 
@@ -40,29 +49,48 @@ const MAX_CONTEXT_LINES = 200;
 const STATUSLINE_KEY = "/m";
 const DEFAULT_TRIGGER_TURN = true;
 
+const NO_POLL_MATCH =
+  "You will be notified automatically when matching output arrives and when this job exits (exit code, last lines, full output path). Do not poll MonitorList to wait for output or completion.";
+const NO_POLL_BG =
+  "No intermediate output is delivered. You will be notified automatically when this job exits (exit code, last lines, full output path). Do not poll.";
+
 /* ------------------------------------------------------------------ */
-  /* ------------------------------------------------------------------ */
-  /* Tool schemas                                                       */
-  /* ------------------------------------------------------------------ */
+/* Tool schemas                                                       */
+/* ------------------------------------------------------------------ */
 
-  const MonitorToolSchema = Type.Object({
-    command: Type.String({ description: "Shell command to run in the background" }),
-    regex: Type.Optional(Type.String({ description: "Regex pattern to match against each stdout line (default: match everything)" })),
-    regexFlags: Type.Optional(Type.String({ description: "RegExp flags (default: '')" })),
-    before: Type.Optional(Type.Number({ description: "Lines of context before match (default: 10)" })),
-    after: Type.Optional(Type.Number({ description: "Lines of context after match (default: 10)" })),
-    debounceSeconds: Type.Optional(Type.Number({ description: "Debounce window in seconds (1-60, default: 5)" })),
-    label: Type.Optional(Type.String({ description: "Human-readable label for this monitor" })),
-    triggerTurn: Type.Optional(Type.Boolean({ default: DEFAULT_TRIGGER_TURN, description: "If true, deliver monitor output as a user turn that triggers an LLM response (default: true; set false to only display/log)" })),
-  });
+const MonitorToolSchema = Type.Object({
+  command: Type.String({
+    description:
+      "Shell command to run in the background. Matching output and process exit are delivered automatically — do not poll.",
+  }),
+  regex: Type.Optional(Type.String({ description: "Regex pattern to match against each stdout line (default: match everything)" })),
+  regexFlags: Type.Optional(Type.String({ description: "RegExp flags (default: '')" })),
+  before: Type.Optional(Type.Number({ description: "Lines of context before match (default: 0)" })),
+  after: Type.Optional(Type.Number({ description: "Lines of context after match (default: 0)" })),
+  debounceSeconds: Type.Optional(Type.Number({ description: "Debounce window in seconds (0-60, default: 0)" })),
+  label: Type.Optional(Type.String({ description: "Human-readable label for this monitor" })),
+  triggerTurn: Type.Optional(Type.Boolean({
+    default: DEFAULT_TRIGGER_TURN,
+    description: "If true, deliver match output as a user turn that triggers an LLM response (default: true; set false to only display/log). Exit notifications always trigger a turn.",
+  })),
+});
 
-  const MonitorStopSchema = Type.Object({
-    id: Type.String({ description: "Monitor ID to stop (e.g., mon_1)" }),
-  });
+const BackgroundToolSchema = Type.Object({
+  command: Type.String({
+    description:
+      "Shell command to run in the background. No intermediate output is delivered. You will be notified when it exits — do not poll.",
+  }),
+  label: Type.Optional(Type.String({ description: "Human-readable label for this background job" })),
+});
 
-  const MonitorListSchema = Type.Object({});
+const MonitorStopSchema = Type.Object({
+  id: Type.String({ description: "Job ID to stop (e.g. mon_1 or bg_1). You will be notified when the process exits after stop." }),
+});
 
-  type MonitorToolParams = Static<typeof MonitorToolSchema>;
+const MonitorListSchema = Type.Object({});
+
+type MonitorToolParams = Static<typeof MonitorToolSchema>;
+type BackgroundToolParams = Static<typeof BackgroundToolSchema>;
 
 /* ------------------------------------------------------------------ */
 /* Extension factory                                                  */
@@ -72,6 +100,7 @@ export default function (pi: ExtensionAPI) {
   let runner: ProcessRunner | null = null;
   let engines: Map<string, MonitorEngine> | null = null;
   let monitorCounter = 0;
+  let backgroundCounter = 0;
   const deliveryBatcher = new MonitorDeliveryBatcher({
     send: (message, triggerTurn) => {
       if (triggerTurn) {
@@ -82,29 +111,105 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  interface MonitorInfo {
+  interface JobInfo {
     id: string;
+    kind: "mon" | "bg";
     command: string;
     regex: string;
     label?: string;
     triggerTurn?: boolean;
     startedAt: number;
+    outputPath: string;
   }
-  let activeMonitors = new Map<string, MonitorInfo>();
+  let activeJobs = new Map<string, JobInfo>();
   let setStatusRef: ((key: string, text: string | undefined) => void) | null = null;
+  /** Jobs that should not send exit notifications (session shutting down). */
+  let suppressExitNotify = false;
+  /**
+   * Bumped on session_start and session_shutdown so exit IIFEs from a prior
+   * session cannot steer into a later session after suppressExitNotify is cleared.
+   */
+  let sessionGeneration = 0;
 
   registerCompactMonitorRenderer(pi);
 
   function updateStatusline(): void {
     if (!setStatusRef) return;
-    if (activeMonitors.size > 0) {
-      setStatusRef(STATUSLINE_KEY, `${activeMonitors.size}`);
+    if (activeJobs.size > 0) {
+      setStatusRef(STATUSLINE_KEY, `${activeJobs.size}`);
     } else {
       setStatusRef(STATUSLINE_KEY, undefined);
     }
   }
 
+  function assertUnderJobLimit(): void {
+    if (activeJobs.size >= MAX_ACTIVE_JOBS) {
+      throw new Error(
+        `maximum of ${MAX_ACTIVE_JOBS} active jobs reached; stop a job before starting another`,
+      );
+    }
+  }
+
+  function sendExitNotification(opts: {
+    jobID: string;
+    kind: "mon" | "bg";
+    command: string;
+    regex: string;
+    label?: string;
+    exitCode: number | null;
+    signal: string | null;
+    outputPath: string;
+    lastLines: string[];
+    /** Session generation captured when the job was started. */
+    sessionGen: number;
+  }): void {
+    // Suppress on shutdown, and drop steers from jobs that belong to an older session.
+    if (suppressExitNotify || opts.sessionGen !== sessionGeneration) return;
+
+    // Flush any pending match batches first so exit arrives after matches.
+    deliveryBatcher.flush();
+
+    const details: PiMonitorMessageDetails = {
+      jobID: opts.jobID,
+      command: opts.command,
+      regex: opts.regex,
+      label: opts.label,
+      matchCount: 0,
+      lineCount: opts.lastLines.length,
+      truncated: false,
+      event: "exit",
+      exitCode: opts.exitCode,
+      signal: opts.signal,
+      outputPath: opts.outputPath,
+      kind: opts.kind,
+    };
+
+    const content = formatMonitorExitXml({
+      jobID: opts.jobID,
+      exitCode: opts.exitCode,
+      signal: opts.signal,
+      outputPath: opts.outputPath,
+      lastLines: opts.lastLines,
+    });
+
+    // Exit always steers the agent (even if match triggerTurn was false).
+    pi.sendMessage(
+      {
+        customType: "pi-monitor",
+        content,
+        display: true,
+        details,
+      },
+      { deliverAs: "steer", triggerTurn: true },
+    );
+  }
+
   pi.on("session_start", async (_event, ctx) => {
+    // New session: clear suppress, bump generation so prior-session exit IIFEs
+    // cannot notify, and revive the batcher after session_shutdown invalidation.
+    sessionGeneration += 1;
+    suppressExitNotify = false;
+    deliveryBatcher.reset();
     runner = new ProcessRunner();
     engines = new Map();
     setStatusRef = ctx.ui.setStatus.bind(ctx.ui);
@@ -112,6 +217,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
+    suppressExitNotify = true;
+    // Bump generation so in-flight exit handlers from this session become inert
+    // even if they race past suppressExitNotify being cleared on the next start.
+    sessionGeneration += 1;
     // Invalidate the batcher first to prevent any scheduled flushes from
     // trying to send on a stale context after session replacement.
     deliveryBatcher.invalidate();
@@ -122,18 +231,22 @@ export default function (pi: ExtensionAPI) {
       engines.clear();
     }
 
-    // Dispose all runner processes
+    // Dispose runner processes (log files are kept on disk)
     if (runner) {
-      // runner doesn't track jobs by list, but engines being destroyed means
-      // the output listeners are removed, so processes will be orphaned.
-      // We rely on process group cleanup via SIGTERM on session exit.
+      for (const jobID of activeJobs.keys()) {
+        try {
+          runner.dispose(jobID);
+        } catch {
+          /* ignore */
+        }
+      }
     }
 
     await closeRedos();
 
     engines = null;
     runner = null;
-    activeMonitors.clear();
+    activeJobs.clear();
     if (setStatusRef) {
       setStatusRef(STATUSLINE_KEY, undefined);
       setStatusRef = null;
@@ -141,11 +254,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   /* ---------------------------------------------------------------- */
-  /* Monitor handler                                                  */
+  /* Shared job start / exit cleanup                                  */
   /* ---------------------------------------------------------------- */
 
-  async function handleMonitor(
-    ctx: ExtensionContext,
+  async function startMonitorJob(
     command: string,
     regex: RegExp,
     before: number,
@@ -153,17 +265,23 @@ export default function (pi: ExtensionAPI) {
     debounceMs: number,
     label?: string,
     triggerTurn?: boolean,
-  ): Promise<string> {
+  ): Promise<{ jobID: string; outputPath: string }> {
     const runnerRef = runner!;
     const enginesRef = engines!;
 
+    assertUnderJobLimit();
     await vetRegexPattern(regex.source, regex.flags);
 
     const shouldTriggerTurn = triggerTurn ?? DEFAULT_TRIGGER_TURN;
     const jobID = `mon_${++monitorCounter}`;
+    // Capture generation at start so exit handlers from this job are inert
+    // after a later session_start/shutdown bumps sessionGeneration.
+    const jobSessionGen = sessionGeneration;
     let engine: MonitorEngine | null = null;
     let onOutput: ((event: OutputEvent) => void) | null = null;
-    let exitPromise: Promise<number | null>;
+
+    let exitPromise: ReturnType<ProcessRunner["run"]>["exitPromise"];
+    let outputPath: string;
 
     try {
       engine = new MonitorEngine({
@@ -173,6 +291,8 @@ export default function (pi: ExtensionAPI) {
         after,
         debounceMs,
         onWindow: (window: MonitorWindow) => {
+          // Drop match deliveries if the session that started this job is gone.
+          if (jobSessionGen !== sessionGeneration) return;
           const lines = window.events.map((e) => e.line).join("\n");
           const details: PiMonitorMessageDetails = {
             jobID,
@@ -182,6 +302,8 @@ export default function (pi: ExtensionAPI) {
             matchCount: window.matchSeqs.length,
             lineCount: window.events.length,
             truncated: window.truncated,
+            event: "match",
+            kind: "mon",
           };
           deliveryBatcher.enqueue({
             raw: lines,
@@ -191,7 +313,7 @@ export default function (pi: ExtensionAPI) {
         },
       });
 
-      ({ exitPromise } = runnerRef.run(jobID, command));
+      ({ exitPromise, outputPath } = runnerRef.run(jobID, command));
     } catch (error) {
       engine?.destroy();
       enginesRef.delete(jobID);
@@ -200,32 +322,123 @@ export default function (pi: ExtensionAPI) {
     }
 
     enginesRef.set(jobID, engine);
-    activeMonitors.set(jobID, { id: jobID, command, regex: regex.source, label, triggerTurn: shouldTriggerTurn, startedAt: Date.now() });
+    activeJobs.set(jobID, {
+      id: jobID,
+      kind: "mon",
+      command,
+      regex: regex.source,
+      label,
+      triggerTurn: shouldTriggerTurn,
+      startedAt: Date.now(),
+      outputPath,
+    });
     updateStatusline();
 
+    // Docs and tool description: match stdout only. Still tee both streams via ProcessRunner.
     onOutput = (event: OutputEvent) => {
-      engine.ingest(event);
+      if (event.stream !== "stdout") return;
+      engine!.ingest(event);
     };
     runnerRef.on("output", onOutput);
 
-    // Async cleanup on process exit
+    // Async cleanup + exit notification on process exit
     (async () => {
+      let exitCode: number | null = null;
+      let signal: string | null = null;
       try {
-        await exitPromise;
-        engine.flush();
+        const result = await exitPromise;
+        exitCode = result.code;
+        signal = result.signal;
+        engine!.flush();
       } catch {
         // process error
       } finally {
+        const lastLines = runnerRef.tailCombined(jobID, EXIT_TAIL_LINES);
+        const path = runnerRef.outputPath(jobID) ?? outputPath;
+        const info = activeJobs.get(jobID);
+
         if (onOutput) runnerRef.removeListener("output", onOutput);
-        engine.destroy();
+        engine!.destroy();
         enginesRef.delete(jobID);
+        // Snapshot before dispose so tails remain available for the message
+        sendExitNotification({
+          jobID,
+          kind: "mon",
+          command: info?.command ?? command,
+          regex: info?.regex ?? regex.source,
+          label: info?.label ?? label,
+          exitCode,
+          signal,
+          outputPath: path,
+          lastLines,
+          sessionGen: jobSessionGen,
+        });
         runnerRef.dispose(jobID);
-        activeMonitors.delete(jobID);
+        activeJobs.delete(jobID);
         updateStatusline();
       }
     })().catch(() => {});
 
-    return `started ${jobID}`;
+    return { jobID, outputPath };
+  }
+
+  async function startBackgroundJob(
+    command: string,
+    label?: string,
+  ): Promise<{ jobID: string; outputPath: string }> {
+    const runnerRef = runner!;
+    assertUnderJobLimit();
+    const jobID = `bg_${++backgroundCounter}`;
+    const jobSessionGen = sessionGeneration;
+
+    const { exitPromise, outputPath } = runnerRef.run(jobID, command);
+
+    activeJobs.set(jobID, {
+      id: jobID,
+      kind: "bg",
+      command,
+      regex: ".*",
+      label,
+      triggerTurn: true,
+      startedAt: Date.now(),
+      outputPath,
+    });
+    updateStatusline();
+
+    // No MonitorEngine — exit-only ("infinite debounce")
+    (async () => {
+      let exitCode: number | null = null;
+      let signal: string | null = null;
+      try {
+        const result = await exitPromise;
+        exitCode = result.code;
+        signal = result.signal;
+      } catch {
+        // process error
+      } finally {
+        const lastLines = runnerRef.tailCombined(jobID, EXIT_TAIL_LINES);
+        const path = runnerRef.outputPath(jobID) ?? outputPath;
+        const info = activeJobs.get(jobID);
+
+        sendExitNotification({
+          jobID,
+          kind: "bg",
+          command: info?.command ?? command,
+          regex: ".*",
+          label: info?.label ?? label,
+          exitCode,
+          signal,
+          outputPath: path,
+          lastLines,
+          sessionGen: jobSessionGen,
+        });
+        runnerRef.dispose(jobID);
+        activeJobs.delete(jobID);
+        updateStatusline();
+      }
+    })().catch(() => {});
+
+    return { jobID, outputPath };
   }
 
   /* ---------------------------------------------------------------- */
@@ -236,44 +449,32 @@ export default function (pi: ExtensionAPI) {
     const runnerRef = runner!;
     const enginesRef = engines!;
 
-    const engine = enginesRef.get(jobID);
-    if (!engine) {
-      return `monitor ${jobID} not found`;
+    if (!activeJobs.has(jobID) && !enginesRef.has(jobID)) {
+      // Still try cancel in case race
+      try {
+        await runnerRef.cancel(jobID);
+      } catch {
+        return `job ${jobID} not found`;
+      }
     }
 
-    engine.destroy();
-    enginesRef.delete(jobID);
-    activeMonitors.delete(jobID);
-    updateStatusline();
+    // Flush pending debounced match windows before destroy so stop does not
+    // drop them; the exit IIFE still runs and will no-op flush on a destroyed engine.
+    const engine = enginesRef.get(jobID);
+    if (engine) {
+      engine.flush();
+      engine.destroy();
+      enginesRef.delete(jobID);
+    }
 
     try {
       await runnerRef.cancel(jobID);
     } catch {
-      // process may already be gone
+      // process may already be gone — exit handler still runs
     }
 
-    return `${jobID} cancelled`;
-  }
-
-  /* ---------------------------------------------------------------- */
-  /* List handler                                                     */
-  /* ---------------------------------------------------------------- */
-
-  function handleList(): string {
-    if (activeMonitors.size === 0) {
-      return "no monitors running";
-    }
-    const now = Date.now();
-    return [...activeMonitors.values()].map((m) => {
-      const elapsed = Math.floor((now - m.startedAt) / 1000);
-      const parts = [`- ${m.id}`];
-      parts.push(`\`${m.command}\``);
-      if (m.regex !== ".*") parts.push(`regex: /${m.regex}/`);
-      if (m.triggerTurn) parts.push("trigger");
-      if (m.label) parts.push(`[${m.label}]`);
-      parts.push(formatUptime(elapsed));
-      return parts.join(" ");
-    }).join("\n");
+    // Exit notification is sent by the job's exit async path once the process closes.
+    return `${jobID} stop requested (you will be notified when the process exits — do not poll)`;
   }
 
   /* ---------------------------------------------------------------- */
@@ -281,7 +482,7 @@ export default function (pi: ExtensionAPI) {
   /* ---------------------------------------------------------------- */
 
   pi.registerCommand("monitor-stop", {
-    description: "Stop a running monitor (/monitor-stop <jobID>)",
+    description: "Stop a running monitor or background job (/monitor-stop <jobID>)",
     handler: async (args, ctx) => {
       const jobID = args.trim();
       if (!jobID) {
@@ -294,16 +495,23 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("monitor-list", {
-    description: "Interactive menu: list running monitors, view tail, stop",
+    description: "Interactive menu: list running jobs (monitors + background), view tail, stop",
     handler: async (_args, ctx) => {
-      if (activeMonitors.size === 0) {
-        ctx.ui.notify("no monitors running", "info");
+      if (activeJobs.size === 0) {
+        ctx.ui.notify("no jobs running", "info");
         return;
       }
       const { showMonitorMenu } = await import("../src/ui/monitor-menu.js");
       await showMonitorMenu({
         ctx: ctx as unknown as Parameters<typeof showMonitorMenu>[0]["ctx"],
-        getMonitors: () => [...activeMonitors.values()].map((m) => ({ ...m })),
+        getMonitors: () => [...activeJobs.values()].map((m) => ({
+          id: m.id,
+          command: m.command,
+          regex: m.regex,
+          label: m.label,
+          triggerTurn: m.triggerTurn,
+          startedAt: m.startedAt,
+        })),
         tail: (jobID, stream) => {
           const r = runner;
           if (!r) return [];
@@ -322,7 +530,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   /* ---------------------------------------------------------------- */
-  /* AI-callable tool                                                 */
+  /* AI-callable tools                                                */
   /* ---------------------------------------------------------------- */
 
   pi.registerTool({
@@ -330,12 +538,13 @@ export default function (pi: ExtensionAPI) {
     label: "Monitor",
     description:
       "Run a shell command in the background and watch stdout for regex matches. " +
-      "Matching windows (with before/after context lines) are delivered to you as they arrive. " +
-      "Use for watching logs, build output, test runners, deploy status. " +
-      "Stderr is not forwarded.",
+      "Matching windows (with optional before/after context) are delivered to you automatically as steer messages. " +
+      "When the process exits you are also notified with exit code, last lines of output, and the path to full output. " +
+      "Do not poll MonitorList to wait for output or completion — you will be notified. " +
+      "Use for watching logs, build output, test runners, deploy status. Stderr is captured to the log file but not matched.",
     parameters: MonitorToolSchema,
     renderShell: "self",
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       const command = (params as MonitorToolParams).command;
       const regexStr = (params as MonitorToolParams).regex ?? ".*";
       const regexFlags = (params as MonitorToolParams).regexFlags;
@@ -388,7 +597,15 @@ export default function (pi: ExtensionAPI) {
       const ds = clampInt(debounceSeconds ?? 0, MIN_MONITOR_DEBOUNCE_S, MAX_MONITOR_DEBOUNCE_S);
 
       try {
-        const result = await handleMonitor(ctx, command, regex, b, a, ds * 1000, label, triggerTurn);
+        const { jobID, outputPath } = await startMonitorJob(
+          command,
+          regex,
+          b,
+          a,
+          ds * 1000,
+          label,
+          triggerTurn,
+        );
         const parts: string[] = [];
         if (regexStr !== ".*") parts.push(`regex: /${regexStr}/`);
         if (b !== 0 || a !== 0) parts.push(`ctx: ±${b === a ? b : `${b}/${a}`}`);
@@ -396,9 +613,21 @@ export default function (pi: ExtensionAPI) {
         if (triggerTurn) parts.push("trigger");
         if (label) parts.push(`[${label}]`);
         const details = parts.length > 0 ? ` (${parts.join(", ")})` : "";
+        const text =
+          `started ${jobID}: \`${command}\`${details}. ${NO_POLL_MATCH} Full output: ${outputPath}`;
         return {
-          content: [{ type: "text", text: `${result}: \`${command}\`${details}` }],
-          details: { command, regex: regexStr, before: b, after: a, debounceSeconds: ds, label, triggerTurn },
+          content: [{ type: "text", text }],
+          details: {
+            command,
+            regex: regexStr,
+            before: b,
+            after: a,
+            debounceSeconds: ds,
+            label,
+            triggerTurn,
+            jobID,
+            outputPath,
+          },
         };
       } catch (error) {
         return {
@@ -408,7 +637,7 @@ export default function (pi: ExtensionAPI) {
         };
       }
     },
-    renderCall: (args, theme, context) =>
+    renderCall: (args, theme, _context) =>
       renderMonitorCall(args as MonitorDetails, theme),
     renderResult: (result, options, theme, context) =>
       renderMonitorResult(
@@ -420,9 +649,54 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "Background",
+    label: "Background",
+    description:
+      "Run a shell command in the background without streaming intermediate output " +
+      "(like a monitor with infinite debounce). When the process exits you are notified " +
+      "with exit code, last lines of output, and the path to full output. " +
+      "Do not poll MonitorList to wait for completion — you will be notified. " +
+      "Use for builds, installs, long scripts, or any fire-and-forget shell work.",
+    parameters: BackgroundToolSchema,
+    renderShell: "self",
+    async execute(_toolCallId, params) {
+      const command = (params as BackgroundToolParams).command;
+      const label = (params as BackgroundToolParams).label;
+
+      try {
+        const { jobID, outputPath } = await startBackgroundJob(command, label);
+        const labelPart = label ? ` [${label}]` : "";
+        const text =
+          `started ${jobID}: \`${command}\`${labelPart}. ${NO_POLL_BG} Full output: ${outputPath}`;
+        return {
+          content: [{ type: "text", text }],
+          details: { command, label, jobID, outputPath },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `Background error: ${(error as Error).message}` }],
+          details: { command, label, jobID: "", outputPath: "" },
+          isError: true,
+        };
+      }
+    },
+    renderCall: (args, theme) =>
+      renderBackgroundCall(args as BackgroundDetails, theme),
+    renderResult: (result, options, theme, context) =>
+      renderBackgroundResult(
+        (result.details as BackgroundDetails) ?? (context.args as BackgroundDetails),
+        context.isError,
+        options.isPartial,
+        theme,
+      ),
+  });
+
+  pi.registerTool({
     name: "MonitorStop",
     label: "Stop Monitor",
-    description: "Stop a running monitor by its ID.",
+    description:
+      "Stop a running monitor or background job by its ID (mon_* or bg_*). " +
+      "You will be notified when the process actually exits after the stop — do not poll.",
     parameters: MonitorStopSchema,
     renderShell: "self",
     async execute(_toolCallId, params) {
@@ -445,26 +719,30 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "MonitorList",
     label: "List Monitors",
-    description: "List all running monitors.",
+    description:
+      "List all running monitors and background jobs (for inspection only). " +
+      "Do not poll this tool to wait for output or completion — matching output and process exits are delivered automatically.",
     parameters: MonitorListSchema,
     renderShell: "self",
     async execute() {
       const now = Date.now();
-      const monitors: ActiveMonitorInfo[] = [...activeMonitors.values()].map((m) => ({
+      const monitors: ActiveMonitorInfo[] = [...activeJobs.values()].map((m) => ({
         id: m.id,
         command: m.command,
         regex: m.regex,
         label: m.label,
         triggerTurn: m.triggerTurn,
         uptimeSec: Math.floor((now - m.startedAt) / 1000),
+        kind: m.kind,
+        outputPath: m.outputPath,
       }));
       // Plain text fallback for the LLM to read in tool result content.
       const text = monitors.length === 0
-        ? "no monitors running"
+        ? "no jobs running. Jobs notify you on match/exit — do not poll this list to wait."
         : monitors
             .map((m) => {
-              const parts = [`- ${m.id}`, `\`${m.command}\``];
-              if (m.regex !== ".*") parts.push(`regex: /${m.regex}/`);
+              const parts = [`- ${m.id}`, `(${m.kind ?? "mon"})`, `\`${m.command}\``];
+              if (m.kind !== "bg" && m.regex !== ".*") parts.push(`regex: /${m.regex}/`);
               if (m.triggerTurn) parts.push("trigger");
               if (m.label) parts.push(`[${m.label}]`);
               parts.push(formatUptime(m.uptimeSec));
@@ -489,5 +767,3 @@ function clampInt(value: number, min: number, max: number): number {
   if (!Number.isInteger(value)) return min;
   return Math.max(min, Math.min(max, value));
 }
-
-

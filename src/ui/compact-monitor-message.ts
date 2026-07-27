@@ -17,6 +17,12 @@ export interface PiMonitorMessageDetails {
   matchCount: number;
   lineCount: number;
   truncated: boolean;
+  /** Delivery kind: match window (default) or process exit. */
+  event?: "match" | "exit";
+  exitCode?: number | null;
+  signal?: string | null;
+  outputPath?: string;
+  kind?: "mon" | "bg";
 }
 
 const ICON = "◈";
@@ -56,10 +62,12 @@ export function buildCompactLine(
     typeof message.content === "string" ? message.content : "",
   );
 
-  const label = details?.label ?? details?.jobID ?? KIND;
+  const kindLabel = details?.kind === "bg" ? "background" : KIND;
+  const label = details?.label ?? details?.jobID ?? kindLabel;
   const matchCount = details?.matchCount ?? 1;
   const lineCount = details?.lineCount ?? 1;
   const truncated = details?.truncated ?? false;
+  const isExit = details?.event === "exit";
 
   const contentLines = content
     .split("\n")
@@ -76,24 +84,36 @@ export function buildCompactLine(
   const parts: string[] = [];
 
   // Prefix: 1-space indent + icon + kind + label
-  parts.push(" " + theme.fg("accent", `${ICON} ${KIND}`) + theme.fg("text", ` · ${label}`));
+  parts.push(" " + theme.fg("accent", `${ICON} ${kindLabel}`) + theme.fg("text", ` · ${label}`));
 
-  if (lineCount > 1) {
-    parts.push(theme.fg("muted", `${lineCount} lines`));
-  }
+  if (isExit) {
+    const code = details?.exitCode;
+    const sig = details?.signal;
+    if (code !== undefined && code !== null) {
+      parts.push(theme.fg(code === 0 ? "success" : "warning", `exited ${code}`));
+    } else if (sig) {
+      parts.push(theme.fg("warning", `exited ${sig}`));
+    } else {
+      parts.push(theme.fg("warning", "exited"));
+    }
+  } else {
+    if (lineCount > 1) {
+      parts.push(theme.fg("muted", `${lineCount} lines`));
+    }
 
-  // Match count when there are multiple matches.
-  if (matchCount > 1) {
-    parts.push(theme.fg("muted", `+${matchCount} matches`));
-  }
+    // Match count when there are multiple matches.
+    if (matchCount > 1) {
+      parts.push(theme.fg("muted", `+${matchCount} matches`));
+    }
 
-  // Truncation indicator.
-  if (truncated) {
-    parts.push(theme.fg("warning", "truncated"));
+    // Truncation indicator.
+    if (truncated) {
+      parts.push(theme.fg("warning", "truncated"));
+    }
   }
 
   // Content snippet.
-  if (snippet.length > 0) {
+  if (snippet.length > 0 && !isExit) {
     parts.push(theme.fg("dim", snippet));
   }
 
@@ -113,13 +133,20 @@ export function buildExpandedComponent(
     typeof message.content === "string" ? message.content : "",
   );
 
-  const label = details?.label ?? details?.jobID ?? KIND;
+  const kindLabel = details?.kind === "bg" ? "background" : KIND;
+  const label = details?.label ?? details?.jobID ?? kindLabel;
   const meta: string[] = [];
-  if (details?.command) meta.push(details.command);
-  if (details?.regex && details.regex !== ".*") meta.push(`/${details.regex}/`);
-  if (details?.truncated) meta.push("truncated");
+  if (details?.event === "exit") {
+    if (details.exitCode !== undefined && details.exitCode !== null) meta.push(`exit ${details.exitCode}`);
+    if (details.signal) meta.push(details.signal);
+    if (details.outputPath) meta.push(details.outputPath);
+  } else {
+    if (details?.command) meta.push(details.command);
+    if (details?.regex && details.regex !== ".*") meta.push(`/${details.regex}/`);
+    if (details?.truncated) meta.push("truncated");
+  }
 
-  const header = `${ICON} ${KIND} · ${label}` + (meta.length > 0 ? ` · ${theme.fg("muted", meta.join(" · "))}` : "");
+  const header = `${ICON} ${kindLabel} · ${label}` + (meta.length > 0 ? ` · ${theme.fg("muted", meta.join(" · "))}` : "");
 
   const container = new Container();
   container.addChild(new Text(theme.fg("accent", header), 1, 0));

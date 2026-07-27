@@ -200,6 +200,62 @@ export function formatMonitorXml(input: MonitorXmlInput): string {
 }
 
 /**
+ * Format a job-exit notification as an XML envelope for the agent.
+ *
+ * Always steers the agent. Includes exit code/signal, full output path,
+ * last few lines, and an explicit no-poll reminder.
+ */
+export interface MonitorExitXmlInput {
+  jobID: string;
+  exitCode: number | null;
+  signal?: string | null;
+  outputPath: string;
+  /** Last few lines of process output (already stream-tagged preferred). */
+  lastLines: string[];
+  /** Epoch ms — defaults to now. */
+  at?: number;
+}
+
+export function formatMonitorExitXml(input: MonitorExitXmlInput): string {
+  const at = input.at ?? Date.now();
+
+  const attrs: string[] = [
+    `id="${escapeXmlAttr(input.jobID)}"`,
+    `event="exit"`,
+    `at="${formatIsoAt(at)}"`,
+  ];
+  if (input.exitCode !== null && input.exitCode !== undefined) {
+    attrs.push(`exitCode="${escapeXmlAttr(String(input.exitCode))}"`);
+  }
+  if (input.signal) {
+    attrs.push(`signal="${escapeXmlAttr(input.signal)}"`);
+  }
+
+  const bodyLines: string[] = [
+    'Do not poll. This job has exited; you were notified automatically.',
+    `exitCode: ${input.exitCode === null || input.exitCode === undefined ? 'null' : String(input.exitCode)}`,
+  ];
+  if (input.signal) {
+    bodyLines.push(`signal: ${input.signal}`);
+  }
+  bodyLines.push(`outputPath: ${input.outputPath}`);
+  bodyLines.push('lastLines:');
+  if (input.lastLines.length === 0) {
+    bodyLines.push('(no output)');
+  } else {
+    for (const line of input.lastLines) {
+      bodyLines.push(line);
+    }
+  }
+
+  const raw = bodyLines.join('\n');
+  const sanitized = sanitize(raw);
+  const redacted = redactSecrets(sanitized);
+
+  return `<${MONITOR_TAG} ${attrs.join(' ')}>\n${escapeXmlText(redacted)}\n</${MONITOR_TAG}>`;
+}
+
+/**
  * Format a delivery payload into structured text.
  *
  * Nonce-fences untrusted process output. If `raw` is already a nonce-fenced

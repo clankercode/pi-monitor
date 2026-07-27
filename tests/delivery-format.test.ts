@@ -4,6 +4,7 @@ import {
   formatCancel,
   formatDelivery,
   formatJobs,
+  formatMonitorExitXml,
   formatMonitorXml,
   generateNonce,
   redactSecrets,
@@ -259,5 +260,59 @@ describe('formatMonitorXml', () => {
   it('formats the at timestamp as ISO 8601 UTC with second precision', () => {
     const xml = formatMonitorXml({ ...baseInput, at: Date.parse('2024-04-21T12:00:00.123Z') });
     assert.ok(xml.includes('at="2024-04-21T12:00:00Z"'));
+  });
+});
+
+describe('formatMonitorExitXml', () => {
+  const baseExit = {
+    jobID: 'mon_1',
+    exitCode: 0 as number | null,
+    outputPath: '/tmp/pi-monitor/1/mon_1.log',
+    lastLines: ['[stdout] hello', '[stdout] done'],
+    at: Date.parse('2026-06-17T01:18:00Z'),
+  };
+
+  it('wraps content in a pi-monitor envelope with event=exit', () => {
+    const xml = formatMonitorExitXml(baseExit);
+    assert.ok(xml.startsWith('<pi-monitor '));
+    assert.ok(xml.endsWith('</pi-monitor>'));
+    assert.ok(xml.includes('event="exit"'));
+    assert.ok(xml.includes('id="mon_1"'));
+    assert.ok(xml.includes('exitCode="0"'));
+  });
+
+  it('includes no-poll reminder, output path, and last lines', () => {
+    const xml = formatMonitorExitXml(baseExit);
+    assert.ok(xml.includes('Do not poll'));
+    assert.ok(xml.includes('outputPath: /tmp/pi-monitor/1/mon_1.log'));
+    assert.ok(xml.includes('lastLines:'));
+    assert.ok(xml.includes('[stdout] hello'));
+    assert.ok(xml.includes('[stdout] done'));
+  });
+
+  it('omits exitCode attribute when null and reports signal', () => {
+    const xml = formatMonitorExitXml({
+      ...baseExit,
+      exitCode: null,
+      signal: 'SIGTERM',
+    });
+    assert.ok(!xml.includes('exitCode="'));
+    assert.ok(xml.includes('signal="SIGTERM"'));
+    assert.ok(xml.includes('exitCode: null'));
+    assert.ok(xml.includes('signal: SIGTERM'));
+  });
+
+  it('shows (no output) when lastLines is empty', () => {
+    const xml = formatMonitorExitXml({ ...baseExit, lastLines: [] });
+    assert.ok(xml.includes('(no output)'));
+  });
+
+  it('redacts secrets in last lines', () => {
+    const xml = formatMonitorExitXml({
+      ...baseExit,
+      lastLines: ['TOKEN=abc123secret'],
+    });
+    assert.ok(!xml.includes('abc123secret'));
+    assert.ok(xml.includes('****'));
   });
 });

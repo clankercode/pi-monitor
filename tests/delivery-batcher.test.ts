@@ -108,4 +108,26 @@ describe('MonitorDeliveryBatcher', () => {
     assert.strictEqual(scheduled.length, 0, 'invalidated batcher must not schedule stale ctx work');
     assert.strictEqual(sent.length, 0, 'invalidated batcher must drop stale ctx work');
   });
+
+  it('reset clears invalidation so later sessions can deliver again', () => {
+    const sent: Array<{ content: string }> = [];
+    const scheduled: Array<() => void> = [];
+    const batcher = new MonitorDeliveryBatcher({
+      schedule: (fn) => { scheduled.push(fn); },
+      send: (message) => { sent.push({ content: message.content }); },
+    });
+
+    batcher.enqueue({ raw: 'stale', details: makeDetails(), triggerTurn: false });
+    batcher.invalidate();
+    scheduled[0]!();
+    assert.strictEqual(sent.length, 0);
+
+    batcher.reset();
+    batcher.enqueue({ raw: 'fresh session line', details: makeDetails(), triggerTurn: false });
+    assert.strictEqual(scheduled.length, 2, 'reset batcher schedules new flushes');
+    scheduled[1]!();
+
+    assert.strictEqual(sent.length, 1);
+    assert.match(sent[0]!.content, /fresh session line/);
+  });
 });

@@ -1,5 +1,8 @@
 import { spawn, type ChildProcess } from 'child_process';
 import { EventEmitter } from 'events';
+import { createWriteStream, mkdirSync, openSync, closeSync, type WriteStream } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Readable } from 'stream';
 import {
   CANCEL_SIGKILL_TIMEOUT_MS,
@@ -17,6 +20,15 @@ export class ProcessRunnerError extends Error {
     super(message);
     this.name = 'ProcessRunnerError';
   }
+}
+
+// ----------------------------------------------------------------
+// Exit result
+// ----------------------------------------------------------------
+
+export interface ProcessExitResult {
+  code: number | null;
+  signal: NodeJS.Signals | null;
 }
 
 // ----------------------------------------------------------------
@@ -58,6 +70,31 @@ class TailBuffer {
 }
 
 // ----------------------------------------------------------------
+// Combined chronological tail (for exit messages)
+// ----------------------------------------------------------------
+
+class CombinedTailBuffer {
+  #lines: string[] = [];
+  #maxLines: number;
+
+  constructor(maxLines: number) {
+    this.#maxLines = maxLines;
+  }
+
+  add(stream: OutputStream, line: string): void {
+    this.#lines.push(`[${stream}] ${line}`);
+    while (this.#lines.length > this.#maxLines) {
+      this.#lines.shift();
+    }
+  }
+
+  snapshot(n?: number): string[] {
+    if (n === undefined || n >= this.#lines.length) return [...this.#lines];
+    return this.#lines.slice(-n);
+  }
+}
+
+// ----------------------------------------------------------------
 // ProcessRunner
 // ----------------------------------------------------------------
 
@@ -67,30 +104,53 @@ export interface ProcessRunnerEvents {
 
 interface ProcessHandle {
   process: ChildProcess;
-  exitPromise: Promise<number | null>;
+  exitPromise: Promise<ProcessExitResult>;
   cancelPending: boolean;
   cancelled: boolean;
+  outputPath: string;
+  logStream: WriteStream;
 }
 
 export class ProcessRunner extends EventEmitter {
   #handles = new Map<string, ProcessHandle>();
   // jobID -> stdout/stderr -> TailBuffer
   #tails = new Map<string, Map<OutputStream, TailBuffer>>();
+  #combinedTails = new Map<string, CombinedTailBuffer>();
+  #outputPaths = new Map<string, string>();
   #nextSeq = 0;
+  #sessionDir: string;
+
+  constructor(sessionDir?: string) {
+    super();
+    this.#sessionDir = sessionDir ?? join(tmpdir(), 'pi-monitor', String(process.pid));
+  }
 
   /**
    * Spawn a POSIX shell command.
-   * Returns { jobID, exitPromise }.
+   * Returns { jobID, exitPromise, outputPath }.
    *
    * - `detached: true` so the process runs in its own process group.
    * - The exit promise is created at spawn time (no race for fast commands).
    * - Output is emitted as `OutputEvent` lines; trailing empty-lines are dropped.
    * - Rolling tails enforce per-stream caps while streams keep draining.
+   * - Full output is tee'd to `outputPath` (stream-tagged lines).
    */
-  run(jobID: string, command: string): { jobID: string; exitPromise: Promise<number | null> } {
+  run(jobID: string, command: string): {
+    jobID: string;
+    exitPromise: Promise<ProcessExitResult>;
+    outputPath: string;
+  } {
     if (this.#handles.has(jobID)) {
       throw new ProcessRunnerError(`job ${jobID} already running`);
     }
+
+    mkdirSync(this.#sessionDir, { recursive: true });
+    const outputPath = join(this.#sessionDir, `${jobID}.log`);
+    // Touch the file synchronously so outputPath is valid immediately (createWriteStream open is async).
+    closeSync(openSync(outputPath, 'a'));
+    const logStream = createWriteStream(outputPath, { flags: 'a' });
+    // Ignore late write errors (e.g. test teardown deleted the temp dir).
+    logStream.on('error', () => {});
 
     const child = spawn('/bin/sh', ['-c', command], {
       detached: true,
@@ -101,14 +161,14 @@ export class ProcessRunner extends EventEmitter {
     // Create the exit promise BEFORE attaching any listeners — avoids the
     // "fast process exits before handler attached" race. Use `close`, not
     // `exit`, so stdout/stderr have ended and final partial lines are flushed.
-    const exitPromise = new Promise<number | null>((resolve) => {
+    const exitPromise = new Promise<ProcessExitResult>((resolve) => {
       child.once('close', (code, signal) => {
-        resolve(code);
+        resolve({ code, signal: signal as NodeJS.Signals | null });
       });
     });
 
-    void this.#onSpawn(jobID, child, exitPromise);
-    return { jobID, exitPromise };
+    void this.#onSpawn(jobID, child, exitPromise, outputPath, logStream);
+    return { jobID, exitPromise, outputPath };
   }
 
   /**
@@ -162,35 +222,113 @@ export class ProcessRunner extends EventEmitter {
     return buf ? buf.snapshot() : [];
   }
 
-  /** Dispose a job, terminating it first if it is still running. */
+  /**
+   * Last N chronological lines (stream-tagged) for exit notifications.
+   * Prefer the in-memory combined tail; falls back to empty if disposed.
+   */
+  tailCombined(jobID: string, n: number): string[] {
+    const buf = this.#combinedTails.get(jobID);
+    if (!buf) return [];
+    return buf.snapshot(n);
+  }
+
+  /** Path to the full output log for a job (available after run, survives dispose). */
+  outputPath(jobID: string): string | undefined {
+    return this.#outputPaths.get(jobID);
+  }
+
+  /**
+   * Dispose a job, terminating it if still running. Does not delete the log file.
+   *
+   * Escalates like cancel (SIGTERM then SIGKILL after grace) but never blocks:
+   * SIGKILL is fire-and-forget so session_shutdown does not hang on exitPromise.
+   */
   dispose(jobID: string): void {
     const handle = this.#handles.get(jobID);
     if (handle?.cancelPending) {
       handle.cancelled = true;
       this.#killGroup(handle.process, 'SIGTERM');
+      const child = handle.process;
+      // Fire-and-forget SIGKILL escalation — do not await exitPromise.
+      void Promise.race([
+        handle.exitPromise.then(() => 'exited' as const),
+        new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), CANCEL_SIGKILL_TIMEOUT_MS)),
+      ]).then((outcome) => {
+        if (outcome === 'timeout') {
+          this.#killGroup(child, 'SIGKILL');
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            /* process already gone */
+          }
+        }
+      });
+    }
+    if (handle?.logStream) {
+      try {
+        handle.logStream.end();
+      } catch {
+        /* ignore */
+      }
     }
     this.#handles.delete(jobID);
     this.#tails.delete(jobID);
+    this.#combinedTails.delete(jobID);
+    // Keep outputPaths so agents can still resolve the log after dispose.
+  }
+
+  /** Dispose every running job (e.g. test teardown). Does not delete log files. */
+  disposeAll(): void {
+    for (const jobID of [...this.#handles.keys()]) {
+      this.dispose(jobID);
+    }
   }
 
   // -- Internal --------------------------------------------------
 
-  #onSpawn(jobID: string, child: ChildProcess, exitPromise: Promise<number | null>): void {
+  #onSpawn(
+    jobID: string,
+    child: ChildProcess,
+    exitPromise: Promise<ProcessExitResult>,
+    outputPath: string,
+    logStream: WriteStream,
+  ): void {
     const tails = new Map<OutputStream, TailBuffer>([
       ['stdout', new TailBuffer(PROCESS_OUTPUT_CAP_LINES, PROCESS_OUTPUT_CAP_BYTES)],
       ['stderr', new TailBuffer(PROCESS_OUTPUT_CAP_LINES, PROCESS_OUTPUT_CAP_BYTES)],
     ]);
 
-    this.#handles.set(jobID, { process: child, exitPromise, cancelPending: true, cancelled: false });
-    this.#tails.set(jobID, tails);
+    // Keep enough combined lines for exit messages even if EXIT_TAIL_LINES grows slightly.
+    const combined = new CombinedTailBuffer(PROCESS_OUTPUT_CAP_LINES);
 
-    void this.#drainStream(jobID, child.stdout!, 'stdout', tails);
-    void this.#drainStream(jobID, child.stderr!, 'stderr', tails);
+    this.#handles.set(jobID, {
+      process: child,
+      exitPromise,
+      cancelPending: true,
+      cancelled: false,
+      outputPath,
+      logStream,
+    });
+    this.#tails.set(jobID, tails);
+    this.#combinedTails.set(jobID, combined);
+    this.#outputPaths.set(jobID, outputPath);
+
+    void this.#drainStream(jobID, child.stdout!, 'stdout', tails, combined, logStream);
+    void this.#drainStream(jobID, child.stderr!, 'stderr', tails, combined, logStream);
 
     child.on('exit', () => {
       const h = this.#handles.get(jobID);
       if (h?.cancelPending) {
         h.cancelPending = false;
+      }
+    });
+
+    // End log stream after process fully closes (streams drained via close event).
+    void exitPromise.then(() => {
+      try {
+        logStream.end();
+      } catch {
+        /* ignore */
       }
     });
   }
@@ -200,6 +338,8 @@ export class ProcessRunner extends EventEmitter {
     stream: Readable,
     type: OutputStream,
     tails: Map<OutputStream, TailBuffer>,
+    combined: CombinedTailBuffer,
+    logStream: WriteStream,
   ): void {
     let buffer = '';
     let pendingEmptyLines = 0;
@@ -207,6 +347,12 @@ export class ProcessRunner extends EventEmitter {
     const emitLine = (line: string) => {
       this.#emit(jobID, type, line);
       tails.get(type)!.add(line);
+      combined.add(type, line);
+      try {
+        logStream.write(`[${type}] ${line}\n`);
+      } catch {
+        /* best-effort log */
+      }
     };
 
     const flushPendingEmptyLines = () => {
