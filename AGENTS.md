@@ -1,5 +1,8 @@
 # @clanker-code/pi-monitor
 
+npm: `@clanker-code/pi-monitor` · GitHub: `clankercode/pi-monitor`
+(npm scope has a hyphen; GitHub org does not).
+
 Pi extension that watches background processes and delivers regex-matching
 stdout windows (with before/after context) to the agent session.
 

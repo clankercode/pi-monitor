@@ -1,6 +1,11 @@
 # @clanker-code/pi-monitor
 
-GitHub: [`clankercode/pi-monitor`](https://github.com/clankercode/pi-monitor) · npm: [`@clanker-code/pi-monitor`](https://www.npmjs.com/package/@clanker-code/pi-monitor)
+| | |
+|---|---|
+| **npm** | [`@clanker-code/pi-monitor`](https://www.npmjs.com/package/@clanker-code/pi-monitor) — scope `@clanker-code` |
+| **GitHub** | [`clankercode/pi-monitor`](https://github.com/clankercode/pi-monitor) — org `clankercode` (no hyphen) |
+
+Naming is intentional and easy to mix up: **npm uses the hyphen** (`@clanker-code/…`); **this repo lives under GitHub `clankercode`** (no hyphen).
 
 A [pi](https://pi.dev) extension that watches background processes and delivers **regex-matching stdout windows** (with before/after context) into the agent session.
 
@@ -30,7 +35,7 @@ This package intentionally diverges from upstream. Keep this table honest on eve
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Package identity | ✅ shipped | Published as `@clanker-code/pi-monitor` on npm; repo `clankercode/pi-monitor`. |
+| Package identity | ✅ shipped | **npm:** `@clanker-code/pi-monitor` (hyphenated scope). **GitHub:** `clankercode/pi-monitor` (no hyphen). |
 | Monitor-only scope | ✅ shipped | Ported ProcessRunner, MonitorEngine, ReDoS protection, nonce-fencing, secret redaction, ANSI stripping. **Dropped** planned `/background`, `/loop`, `/schedule`, and multi-job “jobs” suite. |
 | Working implementation | ✅ shipped | Upstream README describes a planning/scaffold jobs package; this repo is a usable monitor extension. |
 | AI tools: stop + list | ✅ shipped | `MonitorStop` and `MonitorList` are first-class tools (not only slash commands). |

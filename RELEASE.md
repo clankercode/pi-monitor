@@ -66,7 +66,7 @@ repo's release workflow (no token needed):
 1. Open <https://www.npmjs.com/package/@clanker-code/pi-monitor/access>
    (Settings → Trusted Publishing).
 2. Add a **GitHub Actions** publisher:
-   - Organization/user: `clankercode`
+   - Organization/user: `clankercode` (GitHub org — **no** hyphen; npm scope is `@clanker-code`)
    - Repository: `pi-monitor`
    - Workflow filename: `release.yml`
    - Environment: *(leave blank)*
