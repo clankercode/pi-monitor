@@ -1,9 +1,14 @@
-# pi-monitor
+# @clanker-code/pi-monitor
 
 Pi extension that watches background processes and delivers regex-matching
 stdout windows (with before/after context) to the agent session.
 
-Partial pseudo-fork of [pi-monitor-plugin](https://github.com/Shodocan/pi-monitor-plugin) by Walisson Casonatto — ported the monitor tool and core infrastructure (ProcessRunner, MonitorEngine, ReDoS protection, nonce-fencing), dropped background/loop/schedule tools.
+**Partial pseudo-fork** of [pi-monitor-plugin](https://github.com/Shodocan/pi-monitor-plugin)
+by Walisson Casonatto — ported the monitor tool and core infrastructure
+(ProcessRunner, MonitorEngine, ReDoS protection, nonce-fencing), dropped
+background/loop/schedule tools, and added triggerTurn/steer delivery, same-turn
+batching, XML envelopes, compact TUI renderers, and an interactive `/monitor-list`
+menu. Full divergence list lives in [README.md](./README.md#fork-divergences).
 
 ## Features
 
