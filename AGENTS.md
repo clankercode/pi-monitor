@@ -19,7 +19,7 @@ Partial pseudo-fork of [pi-monitor-plugin](https://github.com/Shodocan/pi-monito
 ## Installation
 
 ```bash
-pi install npm:pi-monitor
+pi install npm:@clanker-code/pi-monitor
 # or locally:
 pi install /path/to/pi-monitor
 ```

@@ -1,9 +1,11 @@
 {
-  "name": "pi-monitor",
+  "name": "@clanker-code/pi-monitor",
   "version": "0.1.0",
-  "description": "Background, monitor, loop, and schedule jobs for the pi coding agent, with idle-aware session notifications.",
+  "description": "Pi extension that watches background processes and delivers regex-matching stdout windows to the agent session.",
   "type": "module",
-  "license": "MIT",
+  "license": "Unlicense",
+  "author": "XertroV",
+  "private": false,
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -12,6 +14,14 @@
     "monitoring",
     "notifications"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clankercode/pi-monitor.git"
+  },
+  "homepage": "https://github.com/clankercode/pi-monitor#readme",
+  "bugs": {
+    "url": "https://github.com/clankercode/pi-monitor/issues"
+  },
   "pi": {
     "extensions": [
       "./extensions"
@@ -26,10 +36,14 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts tests/**/*.test.ts",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit && node --import tsx --test tests/*.test.ts tests/**/*.test.ts",
+    "prepublishOnly": "pnpm run check"
   },
   "engines": {
     "node": ">=22.19.0"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
