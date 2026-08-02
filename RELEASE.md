@@ -16,6 +16,8 @@ Every push to `master` and every PR also runs the gate via
 
 Before tagging, refresh user-facing docs if behavior changed:
 
+- **CHANGELOG.md** — move `[Unreleased]` notes into a new version section
+  (date + Added/Changed/Fixed); leave a fresh empty Unreleased stub.
 - **README.md** — install path, tools/params, and especially the
   **Fork divergences** table (keep it honest vs upstream).
 - **AGENTS.md** — only if agent-facing install/commands changed.

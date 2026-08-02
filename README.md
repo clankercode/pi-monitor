@@ -56,7 +56,7 @@ This package intentionally diverges from upstream. Keep this table honest on eve
 | Project/global settings | ✅ shipped | `confirmStop` in `.pi/pi-monitor.json` or `~/.pi/agent/pi-monitor.json` (project overrides global). |
 | License | ✅ shipped | Unlicense / public domain; not MIT like upstream’s published LICENSE. |
 | No GitHub PR-watch skill | intentionally omitted | Upstream plans a `gh`-based PR watcher skill; out of scope here. |
-| Fork maintenance docs | ✅ shipped | `AGENTS.md`, `RELEASE.md`, tag-driven CI publish. |
+| Fork maintenance docs | ✅ shipped | `AGENTS.md`, `CHANGELOG.md`, `RELEASE.md`, tag-driven CI publish. |
 
 ## Install
 
@@ -169,7 +169,7 @@ pnpm test
 pnpm check
 ```
 
-Release process: see [RELEASE.md](./RELEASE.md).
+Changelog: [CHANGELOG.md](./CHANGELOG.md). Release process: [RELEASE.md](./RELEASE.md).
 
 ## Upstream
 
