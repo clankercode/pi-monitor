@@ -33,6 +33,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Stale extension ctx crash** — deferred match flushes and exit steers no longer throw
+  uncaught when `pi.sendMessage` is called after session replacement/reload (`assertActive`).
+  `MonitorDeliveryBatcher.flush` re-checks invalidation per group, swallows send failures,
+  and auto-invalidates; exit notifications use a safe send wrapper.
 - Jobs disappearing from the list without an agent-visible signal when the process exited (exit notification closes that gap).
 
 ## [0.1.1] - 2026-07-27

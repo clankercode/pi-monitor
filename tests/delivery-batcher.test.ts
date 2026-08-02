@@ -130,4 +130,59 @@ describe('MonitorDeliveryBatcher', () => {
     assert.strictEqual(sent.length, 1);
     assert.match(sent[0]!.content, /fresh session line/);
   });
+
+  it('does not throw when send fails mid-flush (stale ctx after session replacement)', () => {
+    const sent: string[] = [];
+    const scheduled: Array<() => void> = [];
+    let calls = 0;
+    const batcher = new MonitorDeliveryBatcher({
+      schedule: (fn) => { scheduled.push(fn); },
+      send: (message) => {
+        calls += 1;
+        if (calls === 1) {
+          throw new Error(
+            'This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload().',
+          );
+        }
+        sent.push(message.content);
+      },
+    });
+
+    // Two groups so a naive loop would attempt a second send after the first throws.
+    batcher.enqueue({ raw: 'first', details: makeDetails({ jobID: 'mon_1' }), triggerTurn: false });
+    batcher.enqueue({ raw: 'second', details: makeDetails({ jobID: 'mon_2' }), triggerTurn: false });
+    assert.strictEqual(scheduled.length, 1);
+
+    assert.doesNotThrow(() => scheduled[0]!());
+    assert.strictEqual(calls, 1, 'stops after the first send failure');
+    assert.strictEqual(sent.length, 0);
+
+    // Auto-invalidated: further enqueues must not schedule or send.
+    batcher.enqueue({ raw: 'after-throw', details: makeDetails({ jobID: 'mon_3' }), triggerTurn: false });
+    assert.strictEqual(scheduled.length, 1);
+    batcher.flush();
+    assert.strictEqual(sent.length, 0);
+  });
+
+  it('drops remaining groups if invalidated after flush has already snapshot pending', () => {
+    const sent: string[] = [];
+    const scheduled: Array<() => void> = [];
+    let batcher!: MonitorDeliveryBatcher;
+    batcher = new MonitorDeliveryBatcher({
+      schedule: (fn) => { scheduled.push(fn); },
+      send: (message) => {
+        // Simulate session_shutdown invalidating mid-flush (after the first send).
+        batcher.invalidate();
+        sent.push(message.content);
+      },
+    });
+
+    batcher.enqueue({ raw: 'one', details: makeDetails({ jobID: 'mon_1' }), triggerTurn: false });
+    batcher.enqueue({ raw: 'two', details: makeDetails({ jobID: 'mon_2' }), triggerTurn: false });
+    scheduled[0]!();
+
+    // First send runs, then invalidate; second group must not send.
+    assert.strictEqual(sent.length, 1, 'only the in-flight first group may send');
+    assert.match(sent[0]!, /one/);
+  });
 });

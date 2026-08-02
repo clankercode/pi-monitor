@@ -103,6 +103,8 @@ export default function (pi: ExtensionAPI) {
   let backgroundCounter = 0;
   const deliveryBatcher = new MonitorDeliveryBatcher({
     send: (message, triggerTurn) => {
+      // Batcher catches throws from send (stale ctx) so deferred flushes never
+      // become uncaughtExceptions. Keep this path direct; do not catch here.
       if (triggerTurn) {
         pi.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
       } else {
@@ -110,6 +112,29 @@ export default function (pi: ExtensionAPI) {
       }
     },
   });
+
+  /**
+   * Best-effort send that never throws after session replacement/reload.
+   * Pi marks the extension runtime stale on dispose; async exit IIFEs and
+   * timers must not turn that into an uncaughtException that kills pi.
+   */
+  function safeSendMessage(
+    message: Parameters<ExtensionAPI["sendMessage"]>[0],
+    options?: Parameters<ExtensionAPI["sendMessage"]>[1],
+  ): boolean {
+    try {
+      if (options !== undefined) {
+        pi.sendMessage(message, options);
+      } else {
+        pi.sendMessage(message);
+      }
+      return true;
+    } catch {
+      // Stale extension ctx (or other send failure). Drop the delivery.
+      deliveryBatcher.invalidate();
+      return false;
+    }
+  }
 
   interface JobInfo {
     id: string;
@@ -135,10 +160,15 @@ export default function (pi: ExtensionAPI) {
 
   function updateStatusline(): void {
     if (!setStatusRef) return;
-    if (activeJobs.size > 0) {
-      setStatusRef(STATUSLINE_KEY, `${activeJobs.size}`);
-    } else {
-      setStatusRef(STATUSLINE_KEY, undefined);
+    try {
+      if (activeJobs.size > 0) {
+        setStatusRef(STATUSLINE_KEY, `${activeJobs.size}`);
+      } else {
+        setStatusRef(STATUSLINE_KEY, undefined);
+      }
+    } catch {
+      // Bound ctx.ui.setStatus can throw once the extension runtime is stale.
+      setStatusRef = null;
     }
   }
 
@@ -193,7 +223,8 @@ export default function (pi: ExtensionAPI) {
     });
 
     // Exit always steers the agent (even if match triggerTurn was false).
-    pi.sendMessage(
+    // Use safeSend so a race with session dispose never throws uncaught.
+    safeSendMessage(
       {
         customType: "pi-monitor",
         content,

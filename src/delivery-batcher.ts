@@ -89,13 +89,26 @@ export class MonitorDeliveryBatcher {
     this.#flushScheduled = false;
 
     for (const group of pending) {
+      // Re-check each iteration: session_shutdown may invalidate mid-flush
+      // (or a previous send may have auto-invalidated after a stale-ctx throw).
+      if (this.#invalidated) return;
+
       const raw = group.rawParts.join('\n');
-      this.#send({
-        customType: 'pi-monitor',
-        content: formatMonitorXml({ raw, jobID: group.details.jobID }),
-        display: true,
-        details: group.details,
-      }, group.triggerTurn);
+      try {
+        this.#send({
+          customType: 'pi-monitor',
+          content: formatMonitorXml({ raw, jobID: group.details.jobID }),
+          display: true,
+          details: group.details,
+        }, group.triggerTurn);
+      } catch {
+        // pi.sendMessage throws once the extension runtime is marked stale
+        // (after session dispose / reload). Swallow so a deferred timer never
+        // becomes an uncaughtException that kills the host process, and stop
+        // delivering anything further from this batcher instance.
+        this.invalidate();
+        return;
+      }
     }
   }
 }

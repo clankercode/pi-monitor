@@ -23,11 +23,12 @@ interface SentMessage {
   options: unknown;
 }
 
-function makeHarness() {
+function makeHarness(options?: { throwOnSend?: boolean | (() => boolean) }) {
   const tools = new Map<string, RegisteredTool>();
   const handlers = new Map<string, Handler[]>();
   const sent: SentMessage[] = [];
   const statuses = new Map<string, string | undefined>();
+  let throwOnSend = options?.throwOnSend ?? false;
 
   const pi = {
     on(eventName: string, handler: Handler) {
@@ -41,6 +42,12 @@ function makeHarness() {
     registerCommand() {},
     registerMessageRenderer() {},
     sendMessage(message: unknown, options?: unknown) {
+      const shouldThrow = typeof throwOnSend === 'function' ? throwOnSend() : throwOnSend;
+      if (shouldThrow) {
+        throw new Error(
+          'This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload().',
+        );
+      }
       sent.push({ message, options });
     },
   } as unknown as ExtensionAPI;
@@ -83,7 +90,18 @@ function makeHarness() {
     return runTool('Background', params);
   }
 
-  return { sent, tools, start, shutdown, runMonitor, runBackground, runTool };
+  return {
+    sent,
+    tools,
+    start,
+    shutdown,
+    runMonitor,
+    runBackground,
+    runTool,
+    setThrowOnSend(value: boolean | (() => boolean)) {
+      throwOnSend = value;
+    },
+  };
 }
 
 async function waitFor(
@@ -446,6 +464,58 @@ describe('pi-monitor extension delivery routing', { concurrency: 1 }, () => {
       assert.equal(overMon.isError, true);
       assert.match(overMon.content[0]!.text, /maximum of \d+ active jobs/i);
     } finally {
+      await h.shutdown();
+    }
+  });
+
+  it('does not throw uncaught when match flush hits stale sendMessage after session dispose', async () => {
+    // Reproduces: Timer flush -> pi.sendMessage -> assertActive throws after
+    // session replacement. Must be swallowed so pi does not exit via uncaughtException.
+    const h = makeHarness();
+    await h.start();
+    try {
+      // Fast, continuous matches so a flush is almost certain after we arm throw.
+      await h.runMonitor({
+        command: "for i in 1 2 3 4 5; do printf 'STALE_CTX_MATCH %s\\n' \"$i\"; sleep 0.02; done",
+        regex: 'STALE_CTX_MATCH',
+        before: 0,
+        after: 0,
+        debounceSeconds: 0,
+        label: 'stale-flush',
+      });
+
+      // Let at least one successful delivery prove the path works, then arm stale.
+      await waitFor(() => h.sent.length > 0, 'initial match before arming stale', 2_000);
+      const beforeStale = h.sent.length;
+      h.setThrowOnSend(true);
+
+      // Enough time for later flushes / exit path to hit send and throw.
+      await new Promise((r) => setTimeout(r, 400));
+
+      // Surviving means throws were contained. No further successful sends after arming.
+      assert.equal(h.sent.length, beforeStale);
+    } finally {
+      h.setThrowOnSend(false);
+      await h.shutdown();
+    }
+  });
+
+  it('does not throw uncaught when exit notification hits stale sendMessage', async () => {
+    const h = makeHarness();
+    await h.start();
+    try {
+      // Arm throw immediately so exit cannot deliver.
+      h.setThrowOnSend(true);
+      await h.runBackground({
+        command: 'printf done; exit 0',
+        label: 'stale-exit',
+      });
+
+      // Wait until the job would have exited and attempted notify.
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(h.sent.length, 0, 'stale exit must not record a successful send');
+    } finally {
+      h.setThrowOnSend(false);
       await h.shutdown();
     }
   });
