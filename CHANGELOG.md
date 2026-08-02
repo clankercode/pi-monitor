@@ -7,6 +7,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-02
+
 ### Added
 
 - **`Background` tool** — fire-and-forget shell jobs (`bg_N` ids) with **no intermediate deliveries**; only exit is reported.
@@ -72,6 +74,7 @@ First tagged release of **`@clanker-code/pi-monitor`** (npm scope `@clanker-code
 
 Package identity and first-publish scaffolding as `@clanker-code/pi-monitor` `0.1.0` (see `RELEASE.md`). Feature work that landed under this version line is summarized under [0.1.1](#011---2026-07-27); `0.1.1` is the first `v*` tag.
 
-[Unreleased]: https://github.com/clankercode/pi-monitor/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/clankercode/pi-monitor/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/clankercode/pi-monitor/releases/tag/v0.2.0
 [0.1.1]: https://github.com/clankercode/pi-monitor/releases/tag/v0.1.1
 [0.1.0]: https://github.com/clankercode/pi-monitor/commits/master
