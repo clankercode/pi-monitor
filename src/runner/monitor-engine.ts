@@ -47,6 +47,7 @@ export class MonitorEngine {
   #droppedFromRing = 0;
   #highestSeenSeq = Number.NEGATIVE_INFINITY;
   #deliveredSeqs = new Set<number>();
+  #pruneThreshold = 0;
   #pending: PendingWindow[] = [];
   #ready: ReadyWindow[] = [];
   #debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -59,6 +60,7 @@ export class MonitorEngine {
     this.#afterWaitMs = opts.afterWaitMs ?? MONITOR_AFTER_WAIT_MS;
     this.#ringSize = opts.ringSize ?? MONITOR_RING_BUFFER_EVENTS;
     this.#validateOptions();
+    this.#pruneThreshold = this.#ringSize;
   }
 
   ingest(event: OutputEvent): void {
@@ -258,20 +260,29 @@ export class MonitorEngine {
     };
   }
 
+  /**
+   * Drop delivered seqs older than anything still protected. Windows hold events
+   * in ascending seq order, so the minimum is the first event of the ring and of
+   * each pending/ready window: O(windows), not O(events). The scan over the set
+   * only runs once it has doubled since the last prune, which keeps the cost amortized O(1).
+   */
   #pruneDeliveredSeqs(): void {
-    const protectedSeqs = [
-      ...this.#ring.map((event) => event.seq),
-      ...this.#pending.flatMap((window) => window.events.map((event) => event.seq)),
-      ...this.#ready.flatMap((window) => window.events.map((event) => event.seq)),
-    ];
-    if (protectedSeqs.length === 0) {
+    if (this.#deliveredSeqs.size < this.#pruneThreshold) return;
+    let minProtectedSeq = this.#ring.length > 0 ? this.#ring[0].seq : Number.POSITIVE_INFINITY;
+    for (const window of this.#pending) {
+      if (window.events.length > 0) minProtectedSeq = Math.min(minProtectedSeq, window.events[0].seq);
+    }
+    for (const window of this.#ready) {
+      if (window.events.length > 0) minProtectedSeq = Math.min(minProtectedSeq, window.events[0].seq);
+    }
+    if (minProtectedSeq === Number.POSITIVE_INFINITY) {
       this.#deliveredSeqs.clear();
-      return;
+    } else {
+      for (const seq of this.#deliveredSeqs) {
+        if (seq < minProtectedSeq) this.#deliveredSeqs.delete(seq);
+      }
     }
-    const minProtectedSeq = Math.min(...protectedSeqs);
-    for (const seq of this.#deliveredSeqs) {
-      if (seq < minProtectedSeq) this.#deliveredSeqs.delete(seq);
-    }
+    this.#pruneThreshold = Math.max(this.#ringSize, this.#deliveredSeqs.size * 2);
   }
 
   #validateOptions(): void {

@@ -239,3 +239,31 @@ describe('MonitorEngine', () => {
     assert.equal(calls[0].truncated, true);
   });
 });
+
+describe('MonitorEngine delivered-seq pruning', () => {
+  it('never redelivers across many emits', () => {
+    const calls: MonitorWindow[] = [];
+    const engine = new MonitorEngine({
+      jobID: 'job-a', regex: /ERR/, before: 2, after: 0, debounceMs: 0, ringSize: 20,
+      onWindow: (w) => calls.push(w),
+    });
+    for (let seq = 1; seq <= 2000; seq += 1) {
+      engine.ingest(makeEvent(seq, seq % 3 === 0 ? 'ERR' : 'ok'));
+    }
+    const delivered = calls.flatMap((w) => w.events.map((e) => e.seq));
+    // before-context of consecutive matches overlaps; no event may be delivered twice
+    assert.equal(new Set(delivered).size, delivered.length);
+  });
+
+  it('handles 60k ingests quickly (no per-emit spread over the ring)', () => {
+    let count = 0;
+    const engine = new MonitorEngine({
+      jobID: 'job-a', regex: /ERR/, before: 0, after: 0, debounceMs: 0,
+      onWindow: () => { count += 1; },
+    });
+    const start = Date.now();
+    for (let seq = 1; seq <= 60_000; seq += 1) engine.ingest(makeEvent(seq, 'ERR'));
+    assert.equal(count, 60_000);
+    assert.ok(Date.now() - start < 3000, `took ${Date.now() - start}ms`);
+  });
+});

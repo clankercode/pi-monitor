@@ -42,3 +42,10 @@ export const REDOS_MAX_CONCURRENT = 4;
 
 // Cancellation limits
 export const CANCEL_SIGKILL_TIMEOUT_MS = 5_000;
+
+// Orphan protection
+export const PIPE_CLOSE_GRACE_MS = 2_000;
+export const PARENT_WATCHDOG_INTERVAL_S = 2;
+
+// Unterminated-line cap in ProcessRunner (chars)
+export const PROCESS_LINE_BUFFER_CAP_CHARS = 64 * 1024;
