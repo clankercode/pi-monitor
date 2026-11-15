@@ -1,11 +1,23 @@
 import { spawn, type ChildProcess } from 'child_process';
 import { EventEmitter } from 'events';
-import { createWriteStream, mkdirSync, openSync, closeSync, type WriteStream } from 'node:fs';
+import {
+  chmodSync,
+  constants as fsConstants,
+  createWriteStream,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  type WriteStream,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Readable } from 'stream';
 import {
   CANCEL_SIGKILL_TIMEOUT_MS,
+  PARENT_WATCHDOG_INTERVAL_S,
+  PIPE_CLOSE_GRACE_MS,
+  PROCESS_LINE_BUFFER_CAP_CHARS,
   PROCESS_OUTPUT_CAP_BYTES,
   PROCESS_OUTPUT_CAP_LINES,
 } from '../limits.ts';
@@ -98,6 +110,86 @@ class CombinedTailBuffer {
 // ProcessRunner
 // ----------------------------------------------------------------
 
+const LINE_TRUNCATED_MARKER = ' …[line truncated]';
+
+// ----------------------------------------------------------------
+// Live process groups — synchronous last-resort kill on Pi exit
+// ----------------------------------------------------------------
+
+const liveGroups = new Set<number>();
+let exitHookInstalled = false;
+
+function installExitHook(): void {
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
+  // 'exit' handlers must be synchronous; process.kill is.
+  process.on('exit', () => {
+    for (const pgid of liveGroups) {
+      try {
+        process.kill(-pgid, 'SIGKILL');
+      } catch {
+        /* group already gone */
+      }
+    }
+    liveGroups.clear();
+  });
+}
+
+function groupAlive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the group exists but is not ours to signal.
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * Wrapper script run as `/bin/sh -c WRAPPER sh <command> <piPid> <intervalSec>`.
+ * A background watcher (stdio detached from the job's pipes) lives in the job's
+ * process group and SIGKILLs the whole group once the Pi pid disappears. The
+ * user's command runs via `eval` in the same shell, so exit code and output are
+ * unchanged; an EXIT trap stops the watcher when the shell ends.
+ */
+const WATCHDOG_WRAPPER = [
+  '( while kill -0 "$2" 2>/dev/null && kill -0 "$$" 2>/dev/null; do sleep "$3"; done;',
+  '  kill -0 "$2" 2>/dev/null || kill -KILL -- "-$$" ) </dev/null >/dev/null 2>&1 &',
+  'W=$!',
+  'trap \'kill "$W" 2>/dev/null\' EXIT',
+  'eval "$1"',
+].join('\n');
+
+export interface ProcessRunnerOptions {
+  /** Pid whose death makes job process groups self-terminate (default: this process). */
+  parentPid?: number;
+  /** Watchdog poll interval in seconds (default PARENT_WATCHDOG_INTERVAL_S). */
+  watchdogIntervalS?: number;
+  /** SIGTERM -> SIGKILL grace in ms (default CANCEL_SIGKILL_TIMEOUT_MS). */
+  sigkillGraceMs?: number;
+  /** Max wait for stdio to close after the shell exits, in ms (default PIPE_CLOSE_GRACE_MS). */
+  pipeCloseGraceMs?: number;
+}
+
+/**
+ * Create (or verify) a private 0700 directory owned by the current user.
+ * Refuses symlinks and directories owned by someone else.
+ */
+function ensurePrivateDir(dir: string): void {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const st = lstatSync(dir);
+  if (!st.isDirectory() || st.isSymbolicLink()) {
+    throw new ProcessRunnerError(`${dir} is not a plain directory`);
+  }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+  if (uid !== undefined && st.uid !== uid) {
+    throw new ProcessRunnerError(`${dir} is not owned by the current user`);
+  }
+  if ((st.mode & 0o077) !== 0) {
+    chmodSync(dir, 0o700);
+  }
+}
+
 export interface ProcessRunnerEvents {
   output: OutputEvent;
 }
@@ -105,7 +197,6 @@ export interface ProcessRunnerEvents {
 interface ProcessHandle {
   process: ChildProcess;
   exitPromise: Promise<ProcessExitResult>;
-  cancelPending: boolean;
   cancelled: boolean;
   outputPath: string;
   logStream: WriteStream;
@@ -118,11 +209,35 @@ export class ProcessRunner extends EventEmitter {
   #combinedTails = new Map<string, CombinedTailBuffer>();
   #outputPaths = new Map<string, string>();
   #nextSeq = 0;
-  #sessionDir: string;
+  #sessionDir: string | undefined;
+  #parentPid: number;
+  #watchdogIntervalS: number;
+  #sigkillGraceMs: number;
+  #pipeCloseGraceMs: number;
 
-  constructor(sessionDir?: string) {
+  /**
+   * @param sessionDir log directory; when omitted a fresh private directory is
+   *   created lazily under `{tmpdir}/pi-monitor-{uid}/` (0700, mkdtemp).
+   */
+  constructor(sessionDir?: string, options: ProcessRunnerOptions = {}) {
     super();
-    this.#sessionDir = sessionDir ?? join(tmpdir(), 'pi-monitor', String(process.pid));
+    this.#sessionDir = sessionDir;
+    this.#parentPid = options.parentPid ?? process.pid;
+    this.#watchdogIntervalS = options.watchdogIntervalS ?? PARENT_WATCHDOG_INTERVAL_S;
+    this.#sigkillGraceMs = options.sigkillGraceMs ?? CANCEL_SIGKILL_TIMEOUT_MS;
+    this.#pipeCloseGraceMs = options.pipeCloseGraceMs ?? PIPE_CLOSE_GRACE_MS;
+  }
+
+  #resolveSessionDir(): string {
+    if (this.#sessionDir === undefined) {
+      const uid = typeof process.getuid === 'function' ? String(process.getuid()) : 'user';
+      const base = join(tmpdir(), `pi-monitor-${uid}`);
+      ensurePrivateDir(base);
+      this.#sessionDir = mkdtempSync(join(base, 'session-'));
+    } else {
+      ensurePrivateDir(this.#sessionDir);
+    }
+    return this.#sessionDir;
   }
 
   /**
@@ -144,27 +259,55 @@ export class ProcessRunner extends EventEmitter {
       throw new ProcessRunnerError(`job ${jobID} already running`);
     }
 
-    mkdirSync(this.#sessionDir, { recursive: true });
-    const outputPath = join(this.#sessionDir, `${jobID}.log`);
-    // Touch the file synchronously so outputPath is valid immediately (createWriteStream open is async).
-    closeSync(openSync(outputPath, 'a'));
-    const logStream = createWriteStream(outputPath, { flags: 'a' });
+    const outputPath = join(this.#resolveSessionDir(), `${jobID}.log`);
+    // Exclusive, no-follow, owner-only create: never reuse or follow a pre-existing path.
+    // The fd is opened synchronously so outputPath is valid immediately.
+    const logFd = openSync(
+      outputPath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_APPEND | (fsConstants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    const logStream = createWriteStream(outputPath, { fd: logFd });
     // Ignore late write errors (e.g. test teardown deleted the temp dir).
     logStream.on('error', () => {});
 
-    const child = spawn('/bin/sh', ['-c', command], {
-      detached: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: false, // spawn already does the shell thing
-    });
+    const child = spawn(
+      '/bin/sh',
+      ['-c', WATCHDOG_WRAPPER, 'sh', command, String(this.#parentPid), String(this.#watchdogIntervalS)],
+      {
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: false, // spawn already does the shell thing
+      },
+    );
+    if (child.pid !== undefined) {
+      liveGroups.add(child.pid);
+      installExitHook();
+    }
 
     // Create the exit promise BEFORE attaching any listeners — avoids the
-    // "fast process exits before handler attached" race. Use `close`, not
-    // `exit`, so stdout/stderr have ended and final partial lines are flushed.
+    // "fast process exits before handler attached" race. Prefer `close` so
+    // stdout/stderr have ended and final partial lines are flushed, but do not
+    // wait forever: a backgrounded grandchild (`cmd &`) can hold the pipes open
+    // after the shell exits, so `exit` arms a bounded wait.
     const exitPromise = new Promise<ProcessExitResult>((resolve) => {
-      child.once('close', (code, signal) => {
-        resolve({ code, signal: signal as NodeJS.Signals | null });
+      let settled = false;
+      let pipeTimer: ReturnType<typeof setTimeout> | undefined;
+      const settle = (code: number | null, signal: NodeJS.Signals | null) => {
+        if (settled) return;
+        settled = true;
+        if (pipeTimer) clearTimeout(pipeTimer);
+        resolve({ code, signal });
+      };
+      child.once('exit', (code, signal) => {
+        pipeTimer = setTimeout(() => {
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          settle(code, signal as NodeJS.Signals | null);
+        }, this.#pipeCloseGraceMs);
+        pipeTimer.unref();
       });
+      child.once('close', (code, signal) => settle(code, signal as NodeJS.Signals | null));
     });
 
     void this.#onSpawn(jobID, child, exitPromise, outputPath, logStream);
@@ -189,26 +332,18 @@ export class ProcessRunner extends EventEmitter {
     }
     handle.cancelled = true;
 
-    // Phase 1 — SIGTERM
+    // Phase 1 — SIGTERM to the whole group
     this.#killGroup(handle.process, 'SIGTERM');
 
-    // Phase 2 — SIGKILL after grace period
+    // Phase 2 — SIGKILL after the grace period. The group is signaled even if
+    // the shell already exited: grandchildren may still be alive and ignoring TERM.
     await Promise.race([
       handle.exitPromise.then(() => {}),
-      new Promise<void>((r) => setTimeout(r, CANCEL_SIGKILL_TIMEOUT_MS)),
+      new Promise<void>((r) => setTimeout(r, this.#sigkillGraceMs).unref()),
     ]);
+    await this.#escalateIfAlive(handle.process);
 
-    if (handle.cancelPending) {
-      // Still alive — bump it with SIGKILL
-      this.#killGroup(handle.process, 'SIGKILL');
-      // Final fallback: direct kill
-      try {
-        handle.process.kill('SIGKILL');
-      } catch {
-        /* process already gone */
-      }
-    }
-
+    // exitPromise is bounded (pipe-close grace), so this cannot hang on grandchildren.
     await handle.exitPromise;
   }
 
@@ -245,24 +380,20 @@ export class ProcessRunner extends EventEmitter {
    */
   dispose(jobID: string): void {
     const handle = this.#handles.get(jobID);
-    if (handle?.cancelPending) {
+    if (handle) {
       handle.cancelled = true;
-      this.#killGroup(handle.process, 'SIGTERM');
       const child = handle.process;
-      // Fire-and-forget SIGKILL escalation — do not await exitPromise.
-      void Promise.race([
-        handle.exitPromise.then(() => 'exited' as const),
-        new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), CANCEL_SIGKILL_TIMEOUT_MS)),
-      ]).then((outcome) => {
-        if (outcome === 'timeout') {
-          this.#killGroup(child, 'SIGKILL');
-          try {
-            child.kill('SIGKILL');
-          } catch {
-            /* process already gone */
-          }
-        }
-      });
+      // Always signal the group: the shell may be gone while `cmd &` grandchildren live on.
+      this.#killGroup(child, 'SIGTERM');
+      if (child.pid !== undefined && groupAlive(child.pid)) {
+        // Fire-and-forget SIGKILL escalation — never block session_shutdown.
+        const timer = setTimeout(() => {
+          void this.#escalateIfAlive(child);
+        }, this.#sigkillGraceMs);
+        timer.unref();
+      } else if (child.pid !== undefined) {
+        liveGroups.delete(child.pid);
+      }
     }
     if (handle?.logStream) {
       try {
@@ -304,7 +435,6 @@ export class ProcessRunner extends EventEmitter {
     this.#handles.set(jobID, {
       process: child,
       exitPromise,
-      cancelPending: true,
       cancelled: false,
       outputPath,
       logStream,
@@ -315,13 +445,6 @@ export class ProcessRunner extends EventEmitter {
 
     void this.#drainStream(jobID, child.stdout!, 'stdout', tails, combined, logStream);
     void this.#drainStream(jobID, child.stderr!, 'stderr', tails, combined, logStream);
-
-    child.on('exit', () => {
-      const h = this.#handles.get(jobID);
-      if (h?.cancelPending) {
-        h.cancelPending = false;
-      }
-    });
 
     // End log stream after process fully closes (streams drained via close event).
     void exitPromise.then(() => {
@@ -376,15 +499,28 @@ export class ProcessRunner extends EventEmitter {
         flushPendingEmptyLines();
         emitLine(line);
       }
+      // Unterminated stream: cap the partial-line buffer and flush it as a truncated line.
+      while (buffer.length > PROCESS_LINE_BUFFER_CAP_CHARS) {
+        flushPendingEmptyLines();
+        emitLine(`${buffer.slice(0, PROCESS_LINE_BUFFER_CAP_CHARS)}${LINE_TRUNCATED_MARKER}`);
+        buffer = buffer.slice(PROCESS_LINE_BUFFER_CAP_CHARS);
+      }
     });
 
-    stream.once('end', () => {
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
       // Flush any remaining partial line (no trailing newline).
       if (buffer.length > 0) {
         flushPendingEmptyLines();
         emitLine(buffer);
+        buffer = '';
       }
-    });
+    };
+    stream.once('end', finish);
+    // Destroyed after the pipe-close grace: no 'end', but still flush what we have.
+    stream.once('close', finish);
   }
 
   #emit(jobID: string, stream: OutputStream, line: string): void {
@@ -398,6 +534,24 @@ export class ProcessRunner extends EventEmitter {
     } satisfies OutputEvent);
   }
 
+  /** SIGKILL the group if any member survives; drop it from the exit-hook registry once gone. */
+  async #escalateIfAlive(child: ChildProcess): Promise<void> {
+    const pgid = child.pid;
+    if (pgid === undefined) return;
+    if (groupAlive(pgid)) {
+      this.#killGroup(child, 'SIGKILL');
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* process already gone */
+      }
+    }
+    // Give the kernel a moment to reap before forgetting the group.
+    await new Promise<void>((r) => setTimeout(r, 50).unref());
+    if (!groupAlive(pgid)) liveGroups.delete(pgid);
+  }
+
+  /** Signal the whole process group (-pgid); fall back to the direct child. */
   #killGroup(child: ChildProcess, signal: NodeJS.Signals): void {
     try {
       if (child.pid !== undefined) {
