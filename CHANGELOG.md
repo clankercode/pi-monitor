@@ -7,6 +7,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Orphans on stop/shutdown** — `cancel()`/`dispose()` always signal the whole process group (SIGTERM, then SIGKILL after the grace period), even after the shell exited; `exitPromise` resolves within 2s of shell exit even if grandchildren hold the pipes.
+- **Orphans when Pi dies** — `process.on('exit')` SIGKILLs live job groups; each job runs a watchdog in its group that kills it when the Pi pid disappears (polls every 2s).
+- **Main-thread load** — partial-line buffer capped at 64KB (flushed as a truncated line); delivered-seq pruning is amortized O(1) instead of spreading up to 50k items per emit.
+- **Logs** — per-session `0700` directory under `{tmpdir}/pi-monitor-{uid}/` (ownership/permissions verified), log files created `O_EXCL|O_NOFOLLOW` with `0600`; never appended to.
+
+### Changed
+
+- Behavior: `cmd &` grandchildren are killed when the job's shell exits and the job is disposed, so `Background` cannot host long-lived daemons.
+
 ## [0.2.0] - 2026-08-02
 
 ### Added
