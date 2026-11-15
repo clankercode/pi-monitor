@@ -116,12 +116,17 @@ const LINE_TRUNCATED_MARKER = ' …[line truncated]';
 // Live process groups — synchronous last-resort kill on Pi exit
 // ----------------------------------------------------------------
 
-const liveGroups = new Set<number>();
-let exitHookInstalled = false;
+// Shared via globalThis so repeated extension reloads (fresh module instances)
+// install one 'exit' listener and share one registry.
+const LIVE_GROUPS_KEY = Symbol.for('@clanker-code/pi-monitor.liveGroups');
+const EXIT_HOOK_KEY = Symbol.for('@clanker-code/pi-monitor.exitHookInstalled');
+// SAFETY: globalThis is only used as a symbol-keyed bag; these two symbol keys are private to this module.
+const globalRegistry = globalThis as unknown as Record<symbol, unknown>;
+const liveGroups = (globalRegistry[LIVE_GROUPS_KEY] ??= new Set<number>()) as Set<number>;
 
 function installExitHook(): void {
-  if (exitHookInstalled) return;
-  exitHookInstalled = true;
+  if (globalRegistry[EXIT_HOOK_KEY]) return;
+  globalRegistry[EXIT_HOOK_KEY] = true;
   // 'exit' handlers must be synchronous; process.kill is.
   process.on('exit', () => {
     for (const pgid of liveGroups) {
@@ -147,17 +152,18 @@ function groupAlive(pgid: number): boolean {
 
 /**
  * Wrapper script run as `/bin/sh -c WRAPPER sh <command> <piPid> <intervalSec>`.
- * A background watcher (stdio detached from the job's pipes) lives in the job's
- * process group and SIGKILLs the whole group once the Pi pid disappears. The
- * user's command runs via `eval` in the same shell, so exit code and output are
- * unchanged; an EXIT trap stops the watcher when the shell ends.
+ * The watcher is double-forked so it is not in the job table of the shell that
+ * runs the user's command (a bare `wait` would otherwise block on it). It lives
+ * in the job's process group and SIGKILLs the whole group once the Pi pid
+ * disappears; it exits on its own once the group's leader (`$$`) is gone. The
+ * user's command then replaces this shell via `exec` (same pid, so `$$` and the
+ * process group are unchanged) and sees no wrapper positional parameters.
+ * `kill -s KILL --` is used because dash rejects the `-SIGNAL --` form.
  */
 const WATCHDOG_WRAPPER = [
-  '( while kill -0 "$2" 2>/dev/null && kill -0 "$$" 2>/dev/null; do sleep "$3"; done;',
-  '  kill -0 "$2" 2>/dev/null || kill -KILL -- "-$$" ) </dev/null >/dev/null 2>&1 &',
-  'W=$!',
-  'trap \'kill "$W" 2>/dev/null\' EXIT',
-  'eval "$1"',
+  '( ( while kill -0 "$2" 2>/dev/null && kill -0 "$$" 2>/dev/null; do sleep "$3"; done;',
+  '    kill -0 "$2" 2>/dev/null || kill -s KILL -- "-$$" ) </dev/null >/dev/null 2>&1 & )',
+  'exec /bin/sh -c "$1"',
 ].join('\n');
 
 export interface ProcessRunnerOptions {
@@ -337,10 +343,15 @@ export class ProcessRunner extends EventEmitter {
 
     // Phase 2 — SIGKILL after the grace period. The group is signaled even if
     // the shell already exited: grandchildren may still be alive and ignoring TERM.
-    await Promise.race([
-      handle.exitPromise.then(() => {}),
-      new Promise<void>((r) => setTimeout(r, this.#sigkillGraceMs).unref()),
-    ]);
+    // Grace is measured on the whole group, not the shell: the shell usually
+    // dies at once while the real workload is still shutting down gracefully.
+    const pgid = handle.process.pid;
+    if (pgid !== undefined) {
+      const deadline = Date.now() + this.#sigkillGraceMs;
+      while (groupAlive(pgid) && Date.now() < deadline) {
+        await new Promise<void>((r) => setTimeout(r, 50).unref());
+      }
+    }
     await this.#escalateIfAlive(handle.process);
 
     // exitPromise is bounded (pipe-close grace), so this cannot hang on grandchildren.

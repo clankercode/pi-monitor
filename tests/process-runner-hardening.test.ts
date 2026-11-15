@@ -1,7 +1,7 @@
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, readFileSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ProcessRunner } from '../src/runner/process-runner.ts';
@@ -89,6 +89,75 @@ describe('ProcessRunner hardening', () => {
     assert.ok(alive(gc));
     fakeParent.kill('SIGKILL');
     assert.ok(await waitFor(() => !alive(gc), 6000), 'job group must die once parent is gone');
+  });
+
+  async function runCollect(runner: ProcessRunner, id: string, command: string) {
+    const lines: string[] = [];
+    runner.on('output', (e: { line: string }) => lines.push(e.line));
+    const { exitPromise } = runner.run(id, command);
+    const result = await exitPromise;
+    return { result, lines };
+  }
+
+  it('a bare `wait` finishes on its own (watcher is not in the shell job table)', async () => {
+    const { runner } = makeRunner({ sigkillGraceMs: 5000, pipeCloseGraceMs: 2000 });
+    const started = Date.now();
+    const { result, lines } = await runCollect(runner, 'wait1', 'sleep 0.2 & wait; echo done');
+    assert.equal(result.code, 0);
+    assert.deepEqual(lines, ['done']);
+    assert.ok(Date.now() - started < 3000, 'must not hang until Pi exits');
+  });
+
+  it('exit code, signal death, EXIT trap and exec keep their native behavior', async () => {
+    const { runner } = makeRunner();
+    assert.equal((await runCollect(runner, 'c3', 'exit 3')).result.code, 3);
+
+    const sig = await runCollect(runner, 'c4', 'kill -TERM $$; sleep 5');
+    assert.equal(sig.result.signal, 'SIGTERM');
+    assert.equal(sig.result.code, null);
+
+    const trap = await runCollect(runner, 'c5', 'trap "echo bye" EXIT; exit 4');
+    assert.equal(trap.result.code, 4);
+    assert.deepEqual(trap.lines, ['bye']);
+
+    const ex = await runCollect(runner, 'c6', 'exec echo execd');
+    assert.equal(ex.result.code, 0);
+    assert.deepEqual(ex.lines, ['execd']);
+  });
+
+  it('wrapper positional parameters do not leak into the user command', async () => {
+    const { runner } = makeRunner();
+    const { lines } = await runCollect(runner, 'pp', 'echo "[$#][$1][$2]"');
+    assert.deepEqual(lines, ['[0][][]']);
+  });
+
+  it('cancel() grace is measured on the whole group, not the shell', async () => {
+    const { runner, dir } = makeRunner({ sigkillGraceMs: 4000, pipeCloseGraceMs: 300 });
+    const pidFile = join(dir, 'g.pid');
+    const marker = join(dir, 'graceful');
+    const gcScript = `trap "sleep 1; echo ok > ${marker}; exit 0" TERM; echo $$ > ${pidFile}; while :; do sleep 0.1; done`;
+    const { exitPromise } = runner.run('g1', `sh -c '${gcScript}' >/dev/null 2>&1 & wait`);
+    assert.ok(await waitFor(() => existsSync(pidFile) && statSync(pidFile).size > 0, 3000));
+    const gc = Number(readFileSync(pidFile, 'utf8').trim());
+    const cancelled = runner.cancel('g1');
+    await new Promise((r) => setTimeout(r, 500));
+    assert.ok(alive(gc), 'grandchild must still be shutting down at 500ms (no early SIGKILL)');
+    await cancelled;
+    await exitPromise;
+    assert.ok(existsSync(marker), 'grandchild must exit gracefully, not via SIGKILL');
+    assert.ok(await waitFor(() => !alive(gc), 2000));
+  });
+
+  const hasDash = spawnSync('dash', ['-c', 'exit 0']).status === 0;
+  it('watchdog kill line works under dash', { skip: !hasDash && 'dash not installed' }, () => {
+    const r = spawnSync('dash', ['-c', 'sleep 30 & kill -s KILL -- "-$$" 2>&1; echo rc=$?'], { encoding: 'utf8' });
+    assert.ok(!/Illegal/.test(r.stdout + r.stderr), r.stdout + r.stderr);
+  });
+
+  it('watchdog kill line uses the dash-compatible form', () => {
+    const src = readFileSync(new URL('../src/runner/process-runner.ts', import.meta.url), 'utf8');
+    assert.ok(src.includes('kill -s KILL -- "-$$"'));
+    assert.ok(!src.includes('kill -KILL --'));
   });
 
   it('watchdog does not alter exit code or output', async () => {
